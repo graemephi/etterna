@@ -3,11 +3,11 @@
 -- except it uses some c++ utility functions to get stuff really working
 -- good luck
 
-local plotWidth, plotHeight = SCREEN_WIDTH * 0.3, SCREEN_HEIGHT
+local plotWidth, plotHeight = SCREEN_WIDTH * 0.15, SCREEN_HEIGHT
 local plotX, plotY = SCREEN_WIDTH - plotWidth/2 - 25, -SCREEN_HEIGHT/2
 local plotMargin = 4
-local dotWidth = 8
-local dotHeight = 0.5
+local dotWidth = 4
+local dotHeight = 4
 local baralpha = 0.2
 local bgalpha = 1
 local textzoom = 0.5
@@ -36,23 +36,13 @@ local function fitY( number, tracks ) -- find Y relative to the middle of the sc
 	return -SCREEN_HEIGHT / 2 + SCREEN_HEIGHT * (number / tracks) * (scrollReverse and -1 or 1)
 end
 
-local function randomTrack( numberoftracks )
-	return math.random(numberoftracks)
-end
-
-local fakestruct = {}	-- table of each note row that has 4 tracks for each row
-for i = 1, 750 do
-	-- the length of the things here do not matter
-	fakestruct[i] = { math.random(2), math.random(2), math.random(2), math.random(2), math.random(2), math.random(2), math.random(2) }
-end
-
 local function interpretNoteData()
 	--[[
 	This particular Notedata format...
 	map of stuff, which is: int row -> [NoteInfoExtended]
 	NoteInfoExtended is made of a TapNoteType and an int for the tracks.
 	]]
-	ms.ok(#noteData)
+	
 	
 	
 end
@@ -112,18 +102,37 @@ p[#p + 1] =
 	Def.ActorMultiVertex {
 	ChartPreviewUpdateMessageCommand = function(self)
 		local verts = {} -- this is a structure which holds each dot and its parameters (x, y, z, color) i dunno this is a copy paste lmao
-		local numberoftracks = #fakestruct[1] -- WOW EFFICIENCY !!!!
-		local numberofrows = #fakestruct -- WOWWW!!!! !!
-		
+		local numberoftracks = #noteData - 2 -- WOW EFFICIENCY !!!!
+		local numberofrows = noteData[1][#noteData[1]] -- WOWWW!!!! !!
 		interpretNoteData()
 		paginateNoteData()
 		
-		for row = 1, numberofrows do
-			local y = fitY(row, numberofrows)
-			local dotcolor = offsetToJudgeColor(0, false) -- some color
+		for row = 1, #noteData[1] do
+			local y = fitY(noteData[1][row], numberofrows)
 			for track = 1, numberoftracks do
 				local x = fitX(track, numberoftracks)
-				if fakestruct[row][track] == 1 then
+				if noteData[track + 1][row] == 1 then
+					local dotcolor = color("#da5757") 
+					if noteData[6][row] == 1 then 
+						dotcolor = color("#da5757")
+					elseif noteData[6][row] == 2 then 
+						dotcolor = color("#003EFF")
+					elseif noteData[6][row] == 3 then 
+						dotcolor = color("#3F6826")
+					elseif noteData[6][row] == 4 then 
+						dotcolor = color("#dff442")
+					elseif noteData[6][row] == 5 then 
+						dotcolor = color("#7a11d6")
+					elseif noteData[6][row] == 6 then 
+						dotcolor = color("#d68311")
+					elseif noteData[6][row] == 7 then 
+						dotcolor = color("#11d6bb")
+					elseif noteData[6][row] == 8 then 
+						dotcolor = color("#5e5d60")
+					elseif noteData[6][row] == 9 then 
+						dotcolor = color("#f9f9f9")
+					end
+					 
 					fillVertStruct( verts, x, y, dotcolor )
 				end
 			end
