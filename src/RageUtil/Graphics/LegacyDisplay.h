@@ -2,16 +2,17 @@
 
 class LegacyDisplay : public RageDisplay
 {
-    std::unique_ptr<RageDisplay> m_driver;
+    std::unique_ptr<RageDisplay> m_display;
   public:
-	LegacyDisplay(RageDisplay* driver) : m_driver(driver) {};
+	LegacyDisplay(RageDisplay* driver) : m_display(driver) {};
 	~LegacyDisplay() override = default;
 	auto Init(const VideoModeParams& p, bool bAllowUnacceleratedRenderer)
 	  -> std::string override;
 
 	[[nodiscard]] auto GetApiDescription() const -> std::string override
 	{
-		return m_driver->GetApiDescription();
+		static std::string s = m_display->GetApiDescription() + " (Legacy)";
+		return s;
 	}
 	virtual void GetDisplaySpecs(DisplaySpecs& out) const override;
 	void ResolutionChanged() override;
@@ -77,7 +78,7 @@ class LegacyDisplay : public RageDisplay
 	auto IsD3DInternal() -> bool override;
 	[[nodiscard]] auto SupportsFullscreenBorderlessWindow() const -> bool override
 	{
-		return m_driver->SupportsFullscreenBorderlessWindow();
+		return m_display->SupportsFullscreenBorderlessWindow();
 	}
 
 	auto CreateCompiledGeometry() -> RageCompiledGeometry* override;
@@ -94,5 +95,6 @@ class LegacyDisplay : public RageDisplay
 
 	auto TryVideoMode(const VideoModeParams& p, bool& bNewDeviceOut) -> std::string override;
 	auto CreateScreenshot() -> RageSurface* override;
-	auto GetOrthoMatrix(float l, float r, float b, float t, float zn, float zf) -> RageMatrix override;
+
+	void UpdateMatrices();
 };
