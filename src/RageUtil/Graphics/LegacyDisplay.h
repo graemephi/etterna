@@ -1,5 +1,6 @@
 #include "RageDisplay.h"
 
+struct MatrixState;
 class LegacyDisplay : public RageDisplay
 {
     std::unique_ptr<RageDisplay> m_display;
@@ -96,5 +97,5 @@ class LegacyDisplay : public RageDisplay
 	auto TryVideoMode(const VideoModeParams& p, bool& bNewDeviceOut) -> std::string override;
 	auto CreateScreenshot() -> RageSurface* override;
 
-	void UpdateMatrices();
+	void DumpMatrices(MatrixState& m);
 };

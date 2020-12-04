@@ -53,7 +53,6 @@ struct MatrixState
 };
 
 static RenderState g_RenderState;
-static MatrixState g_MatrixState;
 
 struct Command
 {
@@ -90,14 +89,14 @@ struct CommandBuffer
 		numCommands += 1;
 	}
 
-	void PushDrawCommand(DrawMode mode, uint8_t* vertex_data, size_t length)
+	void PushDrawCommand(DrawMode mode, MatrixState m, uint8_t* vertex_data, size_t length)
 	{
 		Command command = {};
 		command.type = Command_Draw;
 		command.sizeInBytes = sizeof(Command) + sizeof(MatrixState) + length;
 		command.drawMode = mode;
 		copyIntoBuffer((uint8_t *)&command, sizeof(Command));
-		copyIntoBuffer((uint8_t *)&g_MatrixState, sizeof(MatrixState));
+		copyIntoBuffer((uint8_t *)&m, sizeof(MatrixState));
 		copyIntoBuffer(vertex_data, length);
 		numCommands += 1;
 	}
@@ -118,12 +117,12 @@ struct CommandBuffer
 
 static CommandBuffer g_CommandBuffer;
 
-void LegacyDisplay::UpdateMatrices()
+void LegacyDisplay::DumpMatrices(MatrixState& m)
 {
-	g_MatrixState.projection = *DISPLAY->GetProjectionTop();
-	g_MatrixState.view = *DISPLAY->GetViewTop();
-	g_MatrixState.world = *DISPLAY->GetWorldTop();
-	g_MatrixState.texture = *DISPLAY->GetTextureTop();
+	m.projection = *DISPLAY->GetProjectionTop();
+	m.view = *DISPLAY->GetViewTop();
+	m.world = *DISPLAY->GetWorldTop();
+	m.texture = *DISPLAY->GetTextureTop();
 }
 
 auto
@@ -145,7 +144,7 @@ LegacyDisplay::BeginFrame()
 void
 LegacyDisplay::EndFrame()
 {
-	UpdateMatrices();
+	MatrixState m; DumpMatrices(m);
 
 	uint8_t *cursor = &g_CommandBuffer.buffer[0];
 	for (size_t i = 0; i < g_CommandBuffer.numCommands; i++) {
@@ -233,10 +232,10 @@ LegacyDisplay::EndFrame()
 		cursor += command->sizeInBytes;
 	}
 
-	*(RageMatrix *)DISPLAY->GetProjectionTop() = g_MatrixState.projection;
-	*(RageMatrix *)DISPLAY->GetViewTop() = g_MatrixState.view;
-	*(RageMatrix *)DISPLAY->GetWorldTop() = g_MatrixState.world;
-	*(RageMatrix *)DISPLAY->GetTextureTop() = g_MatrixState.texture;
+	*(RageMatrix *)DISPLAY->GetProjectionTop() = m.projection;
+	*(RageMatrix *)DISPLAY->GetViewTop() = m.view;
+	*(RageMatrix *)DISPLAY->GetWorldTop() = m.world;
+	*(RageMatrix *)DISPLAY->GetTextureTop() = m.texture;
 	return m_display->EndFrame();
 }
 
@@ -371,43 +370,43 @@ LegacyDisplay::SetTextureWrapping(TextureUnit tu, bool b)
 void
 LegacyDisplay::DrawQuadsInternal(const RageSpriteVertex v[], int iNumVerts)
 {
-	UpdateMatrices();
-	g_CommandBuffer.PushDrawCommand(DrawMode_Quads, (uint8_t *)v, iNumVerts * sizeof(RageSpriteVertex));
+	MatrixState m; DumpMatrices(m);
+	g_CommandBuffer.PushDrawCommand(DrawMode_Quads, m, (uint8_t *)v, iNumVerts * sizeof(RageSpriteVertex));
 }
 
 void
 LegacyDisplay::DrawQuadStripInternal(const RageSpriteVertex v[], int iNumVerts)
 {
-	UpdateMatrices();
-	g_CommandBuffer.PushDrawCommand(DrawMode_QuadStrip, (uint8_t *)v, iNumVerts * sizeof(RageSpriteVertex));
+	MatrixState m; DumpMatrices(m);
+	g_CommandBuffer.PushDrawCommand(DrawMode_QuadStrip, m, (uint8_t *)v, iNumVerts * sizeof(RageSpriteVertex));
 }
 
 void
 LegacyDisplay::DrawSymmetricQuadStripInternal(const RageSpriteVertex v[], int iNumVerts)
 {
-	UpdateMatrices();
-	g_CommandBuffer.PushDrawCommand(DrawMode_SymmetricQuadStrip, (uint8_t *)v, iNumVerts * sizeof(RageSpriteVertex));
+	MatrixState m; DumpMatrices(m);
+	g_CommandBuffer.PushDrawCommand(DrawMode_SymmetricQuadStrip, m, (uint8_t *)v, iNumVerts * sizeof(RageSpriteVertex));
 }
 
 void
 LegacyDisplay::DrawFanInternal(const RageSpriteVertex v[], int iNumVerts)
 {
-	UpdateMatrices();
-	g_CommandBuffer.PushDrawCommand(DrawMode_Fan, (uint8_t *)v, iNumVerts * sizeof(RageSpriteVertex));
+	MatrixState m; DumpMatrices(m);
+	g_CommandBuffer.PushDrawCommand(DrawMode_Fan, m, (uint8_t *)v, iNumVerts * sizeof(RageSpriteVertex));
 }
 
 void
 LegacyDisplay::DrawStripInternal(const RageSpriteVertex v[], int iNumVerts)
 {
-	UpdateMatrices();
-	g_CommandBuffer.PushDrawCommand(DrawMode_Strip, (uint8_t *)v, iNumVerts * sizeof(RageSpriteVertex));
+	MatrixState m; DumpMatrices(m);
+	g_CommandBuffer.PushDrawCommand(DrawMode_Strip, m, (uint8_t *)v, iNumVerts * sizeof(RageSpriteVertex));
 }
 
 void
 LegacyDisplay::DrawTrianglesInternal(const RageSpriteVertex v[], int iNumVerts)
 {
-	UpdateMatrices();
-	g_CommandBuffer.PushDrawCommand(DrawMode_Triangles, (uint8_t *)v, iNumVerts * sizeof(RageSpriteVertex));
+	MatrixState m; DumpMatrices(m);
+	g_CommandBuffer.PushDrawCommand(DrawMode_Triangles, m, (uint8_t *)v, iNumVerts * sizeof(RageSpriteVertex));
 }
 
 void
