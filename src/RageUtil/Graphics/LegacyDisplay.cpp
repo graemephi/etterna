@@ -44,6 +44,92 @@ struct RenderState
 	intptr_t textures[NUM_TextureUnit];
 };
 
+#define RENDERSTATE_STATS 1
+#if defined(RENDERSTATE_STATS) && RENDERSTATE_STATS
+#include <array>
+#include <unordered_map>
+
+struct RenderStateStats
+{
+	int32_t frames;
+	int32_t cullMode;
+	int32_t zTestMode;
+	int32_t blendMode;
+	int32_t zBias;
+	int32_t zWrite;
+	int32_t alphaTest;
+	int32_t textureWrapping[NUM_TextureUnit];
+	int32_t textureFiltering[NUM_TextureUnit];
+	int32_t textureMode[NUM_TextureUnit];
+	int32_t textures[NUM_TextureUnit];
+
+	int32_t textureModeCounts[NUM_TextureMode];
+	int32_t blendModeCounts[NUM_BlendMode];
+	int32_t zTestModeCounts[NUM_ZTestMode];
+	int32_t cullModeCounts[NUM_CullMode];
+	std::array<int32_t, 64> textureCounts;
+};
+
+static RenderStateStats g_RenderStateStats = {};
+static std::unordered_map<intptr_t, intptr_t> g_SequentialTextureIDs;
+intptr_t SequentialTextureID(intptr_t id)
+{
+	// Terrible std api: this line is the insertion
+	intptr_t result = g_SequentialTextureIDs[id];
+	if (result == 0) {
+		result = g_SequentialTextureIDs.size();
+		g_SequentialTextureIDs[id] = result;
+	}
+	return result - 1;
+}
+
+/*
+Loading the game and playing you suffer, exiting back to music wheel:
+frames: 51847
+cullMode: 0
+zTestMode: 304
+blendMode: 304
+zBias: 304
+zWrite: 304
+alphaTest: 0
+textureWrapping: {102112, 0, 0, 0, 0, 0, 0, 0}
+textureFiltering: {0, 0, 0, 0, 0, 0, 0, 0}
+textureMode: {108341, 0, 0, 0, 0, 0, 0, 0}
+textures: {1257517, 0, 0, 0, 0, 0, 0, 0}
+textureModeCounts: {80094, 28247, 0}
+blendModeCounts: {152, 0, 0, 0, 0, 0, 0, 0, 0, 0, 152}
+zTestModeCounts: {152, 152, 0}
+cullModeCounts: {0, 0, 0}
+textureCounts:
+    [00]: 377337
+    [01]: 411274
+    [02]: 26
+    [03]: 145066
+    [04]: 2
+    [05]: 51852
+    [06]: 113082
+    [07]: 89
+    [08]: 89
+    [09]: 165
+    [10]: 1699
+    [11]: 49369
+    [12]: 49369
+    [13]: 49368
+    [14]: 4058
+    [15]: 1290
+    [16]: 1290
+    [17]: 1290
+    [18]: 307
+    [19]: 307
+    [20]: 188
+    [21]: 0
+*/
+
+#define IncrementStatistic(field) g_RenderStateStats.field++
+#else
+#define IncrementStatistic(field) void
+#endif
+
 struct MatrixState
 {
 	RageMatrix projection;
@@ -104,6 +190,7 @@ struct CommandBuffer
 	void Clear()
 	{
 		buffer.clear();
+
 		numCommands = 0;
 	}
 
@@ -145,6 +232,8 @@ LegacyDisplay::BeginFrame()
 void
 LegacyDisplay::EndFrame()
 {
+	IncrementStatistic(frames);
+
 	MatrixState m; DumpMatrices(m);
 
 	uint8_t *cursor = &g_CommandBuffer.buffer[0];
@@ -244,6 +333,7 @@ void
 LegacyDisplay::SetAlphaTest(bool b)
 {
 	if (g_RenderState.alphaTest != b) {
+		IncrementStatistic(alphaTest);
 		g_RenderState.alphaTest = b;
 		Command command = {};
 		command.type = Command_SetAlphaTest;
@@ -256,6 +346,8 @@ void
 LegacyDisplay::SetBlendMode(BlendMode mode)
 {
 	if (g_RenderState.blendMode != mode) {
+		IncrementStatistic(blendMode);
+		IncrementStatistic(blendModeCounts[mode]);
 		g_RenderState.blendMode = mode;
 		Command command = {};
 		command.type = Command_SetBlendMode;
@@ -268,6 +360,8 @@ void
 LegacyDisplay::SetCullMode(CullMode mode)
 {
 	if (g_RenderState.cullMode != mode) {
+		IncrementStatistic(cullMode);
+		IncrementStatistic(cullModeCounts[mode]);
 		g_RenderState.cullMode = mode;
 		Command command = {};
 		command.type = Command_SetCullMode;
@@ -280,6 +374,7 @@ void
 LegacyDisplay::SetZBias(float f)
 {
 	if (g_RenderState.zBias != f) {
+		IncrementStatistic(zBias);
 		g_RenderState.zBias = f;
 		Command command = {};
 		command.type = Command_SetZBias;
@@ -292,6 +387,7 @@ void
 LegacyDisplay::SetZWrite(bool b)
 {
 	if (g_RenderState.zWrite != b) {
+		IncrementStatistic(zWrite);
 		g_RenderState.zWrite = b;
 		Command command = {};
 		command.type = Command_SetZWrite;
@@ -304,6 +400,8 @@ void
 LegacyDisplay::SetZTestMode(ZTestMode mode)
 {
 	if (g_RenderState.zTestMode != mode) {
+		IncrementStatistic(zTestMode);
+		IncrementStatistic(zTestModeCounts[mode]);
 		g_RenderState.zTestMode = mode;
 		Command command = {};
 		command.type = Command_SetZTestMode;
@@ -324,6 +422,8 @@ void
 LegacyDisplay::SetTexture(TextureUnit tu, intptr_t iTexture)
 {
 	if (g_RenderState.textures[tu] != iTexture) {
+		IncrementStatistic(textures[tu]);
+		IncrementStatistic(textureCounts[SequentialTextureID(iTexture)]);
 		g_RenderState.textures[tu] = iTexture;
 		Command command = {};
 		command.type = Command_SetTexture;
@@ -336,6 +436,8 @@ void
 LegacyDisplay::SetTextureMode(TextureUnit tu, TextureMode tm)
 {
 	if (g_RenderState.textureMode[tu] != tm) {
+		IncrementStatistic(textureMode[tu]);
+		IncrementStatistic(textureModeCounts[tm]);
 		g_RenderState.textureMode[tu] = tm;
 		Command command = {};
 		command.type = Command_SetTextureMode;
@@ -348,6 +450,7 @@ void
 LegacyDisplay::SetTextureFiltering(TextureUnit tu, bool b)
 {
 	if (g_RenderState.textureFiltering[tu] != b) {
+		IncrementStatistic(textureFiltering[tu]);
 		g_RenderState.textureFiltering[tu] = b;
 		Command command = {};
 		command.type = Command_SetTextureFiltering;
@@ -360,6 +463,7 @@ void
 LegacyDisplay::SetTextureWrapping(TextureUnit tu, bool b)
 {
 	if (g_RenderState.textureWrapping[tu] != b) {
+		IncrementStatistic(textureWrapping[tu]);
 		g_RenderState.textureWrapping[tu] = b;
 		Command command = {};
 		command.type = Command_SetTextureWrapping;
