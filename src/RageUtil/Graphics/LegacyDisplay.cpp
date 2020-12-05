@@ -138,6 +138,7 @@ LegacyDisplay::BeginFrame()
 	g_RenderState.alphaTest = true;
 	g_RenderState.textureFiltering[0] = true;
 	g_RenderState.textureMode[0] = TextureMode_Invalid;
+	g_RenderState.textureWrapping[0] = false;
 	return m_display->BeginFrame();
 }
 
