@@ -48,6 +48,13 @@ struct RenderState
 #if defined(RENDERSTATE_STATS) && RENDERSTATE_STATS
 #include <array>
 #include <unordered_map>
+#include <chrono>
+
+static auto g_BeginFrameTime = std::chrono::steady_clock::now();
+static auto g_LastCheck = std::chrono::steady_clock::now();
+static double g_DriverOverhead = 0;
+static double g_DriverOverheadAccumulator = 0;
+static uint64_t g_FrameCount = 0;
 
 struct RenderStateStats
 {
@@ -226,14 +233,16 @@ LegacyDisplay::BeginFrame()
 	g_RenderState.textureFiltering[0] = true;
 	g_RenderState.textureMode[0] = TextureMode_Invalid;
 	g_RenderState.textureWrapping[0] = false;
+	g_BeginFrameTime = std::chrono::steady_clock::now();
 	return m_display->BeginFrame();
 }
 
 void
 LegacyDisplay::EndFrame()
 {
-	IncrementStatistic(frames);
+	auto endFrameTime = std::chrono::steady_clock::now();
 
+	IncrementStatistic(frames);
 	MatrixState m; DumpMatrices(m);
 
 	uint8_t *cursor = &g_CommandBuffer.buffer[0];
@@ -326,7 +335,31 @@ LegacyDisplay::EndFrame()
 	*(RageMatrix *)DISPLAY->GetViewTop() = m.view;
 	*(RageMatrix *)DISPLAY->GetWorldTop() = m.world;
 	*(RageMatrix *)DISPLAY->GetTextureTop() = m.texture;
+
+	auto endDriverTime = std::chrono::steady_clock::now();
+
+	std::chrono::duration<double> drawTime = endFrameTime - g_BeginFrameTime;
+	std::chrono::duration<double> totalTime = endDriverTime - g_BeginFrameTime;
+
+	auto overhead = (totalTime - drawTime) / totalTime;
+	g_DriverOverheadAccumulator += overhead;
+	g_FrameCount++;
+
+	using namespace std::chrono_literals;
+	if ((endDriverTime - g_LastCheck) > 1.0s) {
+		g_LastCheck = std::chrono::steady_clock::now();
+		g_DriverOverhead = g_DriverOverheadAccumulator / g_FrameCount;
+		g_DriverOverheadAccumulator = 0;
+		g_FrameCount = 0;
+	}
+
 	return m_display->EndFrame();
+}
+
+auto
+LegacyDisplay::GetStats() const -> std::string
+{
+	return ssprintf("%.2f DO\n", g_DriverOverhead) + RageDisplay::GetStats();
 }
 
 void

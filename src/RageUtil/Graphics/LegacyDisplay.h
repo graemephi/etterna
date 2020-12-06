@@ -85,6 +85,8 @@ class LegacyDisplay : public RageDisplay
 	auto CreateCompiledGeometry() -> RageCompiledGeometry* override;
 	void DeleteCompiledGeometry(RageCompiledGeometry* p) override;
 
+	auto GetStats() const -> std::string override;
+
   protected:
 	void DrawQuadsInternal(const RageSpriteVertex v[], int iNumVerts) override;
 	void DrawQuadStripInternal(const RageSpriteVertex v[], int iNumVerts) override;
