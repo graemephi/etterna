@@ -75,6 +75,13 @@ struct RenderStateStats
 	int32_t zTestModeCounts[NUM_ZTestMode];
 	int32_t cullModeCounts[NUM_CullMode];
 	std::array<int32_t, 64> textureCounts;
+
+	int32_t DrawQuads;
+	int32_t DrawQuadStrip;
+	int32_t DrawSymmetricQuadStrip;
+	int32_t DrawFan;
+	int32_t DrawStrip;
+	int32_t DrawTriangles;
 };
 
 static RenderStateStats g_RenderStateStats = {};
@@ -508,6 +515,7 @@ LegacyDisplay::SetTextureWrapping(TextureUnit tu, bool b)
 void
 LegacyDisplay::DrawQuadsInternal(const RageSpriteVertex v[], int iNumVerts)
 {
+	IncrementStatistic(DrawQuads);
 	MatrixState m; DumpMatrices(m);
 	g_CommandBuffer.PushDrawCommand(DrawMode_Quads, m, (uint8_t *)v, iNumVerts * sizeof(RageSpriteVertex));
 }
@@ -515,6 +523,7 @@ LegacyDisplay::DrawQuadsInternal(const RageSpriteVertex v[], int iNumVerts)
 void
 LegacyDisplay::DrawQuadStripInternal(const RageSpriteVertex v[], int iNumVerts)
 {
+	IncrementStatistic(DrawQuadStrip);
 	MatrixState m; DumpMatrices(m);
 	g_CommandBuffer.PushDrawCommand(DrawMode_QuadStrip, m, (uint8_t *)v, iNumVerts * sizeof(RageSpriteVertex));
 }
@@ -522,6 +531,7 @@ LegacyDisplay::DrawQuadStripInternal(const RageSpriteVertex v[], int iNumVerts)
 void
 LegacyDisplay::DrawSymmetricQuadStripInternal(const RageSpriteVertex v[], int iNumVerts)
 {
+	IncrementStatistic(DrawSymmetricQuadStrip);
 	MatrixState m; DumpMatrices(m);
 	g_CommandBuffer.PushDrawCommand(DrawMode_SymmetricQuadStrip, m, (uint8_t *)v, iNumVerts * sizeof(RageSpriteVertex));
 }
@@ -529,6 +539,7 @@ LegacyDisplay::DrawSymmetricQuadStripInternal(const RageSpriteVertex v[], int iN
 void
 LegacyDisplay::DrawFanInternal(const RageSpriteVertex v[], int iNumVerts)
 {
+	IncrementStatistic(DrawFan);
 	MatrixState m; DumpMatrices(m);
 	g_CommandBuffer.PushDrawCommand(DrawMode_Fan, m, (uint8_t *)v, iNumVerts * sizeof(RageSpriteVertex));
 }
@@ -536,6 +547,7 @@ LegacyDisplay::DrawFanInternal(const RageSpriteVertex v[], int iNumVerts)
 void
 LegacyDisplay::DrawStripInternal(const RageSpriteVertex v[], int iNumVerts)
 {
+	IncrementStatistic(DrawStrip);
 	MatrixState m; DumpMatrices(m);
 	g_CommandBuffer.PushDrawCommand(DrawMode_Strip, m, (uint8_t *)v, iNumVerts * sizeof(RageSpriteVertex));
 }
@@ -543,6 +555,7 @@ LegacyDisplay::DrawStripInternal(const RageSpriteVertex v[], int iNumVerts)
 void
 LegacyDisplay::DrawTrianglesInternal(const RageSpriteVertex v[], int iNumVerts)
 {
+	IncrementStatistic(DrawTriangles);
 	MatrixState m; DumpMatrices(m);
 	g_CommandBuffer.PushDrawCommand(DrawMode_Triangles, m, (uint8_t *)v, iNumVerts * sizeof(RageSpriteVertex));
 }
