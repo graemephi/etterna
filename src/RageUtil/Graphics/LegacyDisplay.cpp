@@ -175,6 +175,13 @@ struct Command
 	};
 };
 
+struct DrawCommand
+{
+	Command command;
+	MatrixState matrices;
+	RageSpriteVertex verts[1];
+};
+
 struct CommandBuffer
 {
 	std::vector<uint8_t> buffer;
@@ -293,15 +300,16 @@ LegacyDisplay::EndFrame()
 			} break;
 			case Command_Draw: {
 				// Ugly but no point in doing better
-				MatrixState *m = (MatrixState *)(cursor + sizeof(Command));
+				DrawCommand *dc = (DrawCommand *)cursor;
 				int32_t numVertices = (command->sizeInBytes - sizeof(Command) - sizeof(MatrixState)) / sizeof(RageSpriteVertex);
-				RageSpriteVertex *vertexData = (RageSpriteVertex *)(cursor + sizeof(Command) + sizeof(MatrixState));
+				RageSpriteVertex *vertexData = dc->verts;
+				const MatrixState& m = dc->matrices;
 
 				// We could push and pop here like good citizens, but we won't
-				*(RageMatrix *)DISPLAY->GetProjectionTop() = m->projection;
-				*(RageMatrix *)DISPLAY->GetViewTop() = m->view;
-				*(RageMatrix *)DISPLAY->GetWorldTop() = m->world;
-				*(RageMatrix *)DISPLAY->GetTextureTop() = m->texture;
+				*(RageMatrix *)DISPLAY->GetProjectionTop() = m.projection;
+				*(RageMatrix *)DISPLAY->GetViewTop() = m.view;
+				*(RageMatrix *)DISPLAY->GetWorldTop() = m.world;
+				*(RageMatrix *)DISPLAY->GetTextureTop() = m.texture;
 
 				switch (command->drawMode) {
 					case DrawMode_Quads: {
@@ -578,6 +586,52 @@ LegacyDisplay::IsZTestEnabled() const
 	-> bool
 {
 	FAIL_M("Never called?");
+}
+
+void
+LegacyDisplay::PushQuads(RenderQuad q[], size_t numQuads)
+{
+	static std::vector<RageSpriteVertex> rqv;
+	rqv.resize(numQuads * 4);
+
+	intptr_t firstTexture = q[0].texture;
+	TextureMode firstTextureMode = q[0].textureMode;
+	bool firstTextureWrapping = q[0].textureWrapping;
+	bool firstTextureFiltering = q[0].textureFiltering;
+
+	SetTexture(TextureUnit_1, firstTexture);
+	SetTextureMode(TextureUnit_1, firstTextureMode);
+	SetTextureWrapping(TextureUnit_1, firstTextureWrapping);
+	SetTextureFiltering(TextureUnit_1, firstTextureFiltering);
+
+	auto v = &rqv[0];
+	for (size_t i = 0; i < numQuads; i++) {
+		const auto& quad = q[i];
+
+		ASSERT_M(quad.texture == firstTexture, "Multiple textures in one PushQuads is not implemented");
+		ASSERT_M(quad.textureMode == firstTextureMode, "Multiple texture modes in one PushQuads is not implemented");
+		ASSERT_M(quad.textureWrapping == firstTextureWrapping, "Multiple texture wrappings in one PushQuads is not implemented");
+		ASSERT_M(quad.textureFiltering == firstTextureFiltering, "Multiple texture filterings in one PushQuads is not implemented");
+
+		v[0].p = RageVector3(quad.rect.left, quad.rect.top, 0);
+		v[1].p = RageVector3(quad.rect.left, quad.rect.bottom, 0);
+		v[2].p = RageVector3(quad.rect.right, quad.rect.bottom, 0);
+		v[3].p = RageVector3(quad.rect.right, quad.rect.top, 0);
+
+		v[0].t = RageVector2(quad.texCoords.left, quad.texCoords.top);
+		v[1].t = RageVector2(quad.texCoords.left, quad.texCoords.bottom);
+		v[2].t = RageVector2(quad.texCoords.right, quad.texCoords.bottom);
+		v[3].t = RageVector2(quad.texCoords.right, quad.texCoords.top);
+
+		v[0].c = RageVColor(quad.colors[0]);
+		v[1].c = RageVColor(quad.colors[1]);
+		v[2].c = RageVColor(quad.colors[2]);
+		v[3].c = RageVColor(quad.colors[3]);
+
+		v += 4;
+	}
+
+	DrawQuads(&rqv[0], numQuads * 4);
 }
 
 // All functions below are forwarded to the underlying display immediately.

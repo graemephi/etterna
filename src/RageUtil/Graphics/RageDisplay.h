@@ -6,6 +6,87 @@
 #include "Etterna/Actor/Base/ModelTypes.h"
 #include "RageUtil/Misc/RageTypes.h"
 
+// New API thing--temporarily going here instead of dealing with c++
+struct RenderQuad
+{
+	RectF rect;
+	RageColor colors[4] = {};
+	RectF texCoords = {};
+	intptr_t texture = 0;
+	TextureMode textureMode = TextureMode_Modulate;
+
+	// These probably never change for a given texture, so move them off this
+	// and onto textures asap
+	bool textureWrapping = false;
+	bool textureFiltering = true;
+
+	RenderQuad() = default;
+	RenderQuad(float x, float y) : rect(x * -0.5, y * -0.5, x * 0.5, y * 0.5) {};
+
+	auto Rect(RectF rect) const -> RenderQuad
+	{
+		RenderQuad q = *this;
+		q.rect = rect;
+		return q;
+	}
+	auto Colors(const RageColor colors[4]) const -> RenderQuad
+	{
+		RenderQuad q = *this;
+		q.colors[0] = colors[0];
+		q.colors[1] = colors[2];
+		q.colors[2] = colors[3];
+		q.colors[3] = colors[1];
+		return q;
+	}
+	auto Color(RageColor c) const -> RenderQuad
+	{
+		RenderQuad q = *this;
+		q.colors[0] = c;
+		q.colors[1] = c;
+		q.colors[2] = c;
+		q.colors[3] = c;
+		return q;
+	}
+	auto Texture(intptr_t handle, RectF texCoords) const -> RenderQuad
+	{
+		RenderQuad q = *this;
+		q.texture = handle;
+		q.texCoords = texCoords;
+		return q;
+	}
+	auto TextureMode(TextureMode m) const -> RenderQuad
+	{
+		RenderQuad q = *this;
+		q.textureMode = m;
+		return q;
+	}
+	auto TextureWrapping(bool b) const -> RenderQuad
+	{
+		RenderQuad q = *this;
+		q.textureWrapping = b;
+		return q;
+	}
+	auto TextureFiltering(bool b) const -> RenderQuad
+	{
+		RenderQuad q = *this;
+		q.textureFiltering = b;
+		return q;
+	}
+	auto Translate(RageVector2 v) const -> RenderQuad
+	{
+		RenderQuad q = *this;
+		q.rect.left += v.x;
+		q.rect.right += v.x;
+		q.rect.top += v.y;
+		q.rect.bottom += v.y;
+		return q;
+	}
+	auto Translate(float x, float y) const -> RenderQuad
+	{
+		return Translate(RageVector2(x, y));
+	}
+};
+
 #include <chrono>
 #include <set>
 #include <utility>
@@ -542,6 +623,10 @@ class RageDisplay
 						 unsigned Bmask,
 						 unsigned Amask,
 						 bool realtime = false) -> RagePixelFormat;
+
+	// New API temp home
+	virtual void PushQuad(RenderQuad& q) { PushQuads(&q, 1); }
+	virtual void PushQuads(RenderQuad q[], size_t numQuads) {}
 
 	// Lua
 	void PushSelf(lua_State* L);

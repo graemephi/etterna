@@ -966,6 +966,77 @@ NoteDisplay::DrawHoldPart(vector<Sprite*>& vpSpr,
 	const auto fTexCoordRight = rect.right;
 	const auto fTexCoordCenter = (fTexCoordLeft + fTexCoordRight) / 2;
 
+	// Figure out the conditions later. funny business = non-constant arrow
+	// effects and splines, and this assertion
+	ASSERT(vpSpr.size() == 1);
+	bool no_funny_business = true;
+	if (no_funny_business) {
+		const auto fYOffsetStart = ArrowEffects::GetYOffsetFromYPos(
+			column_args.column, y_start_pos, m_fYReverseOffsetPixels);
+		const auto fYOffsetEnd = ArrowEffects::GetYOffsetFromYPos(
+			column_args.column, y_end_pos, m_fYReverseOffsetPixels);
+		RageVector3 start = {};
+		ArrowEffects::GetXYZPos(m_pPlayerState, column_args.column, fYOffsetStart, m_fYReverseOffsetPixels, start);
+		RageVector3 end = {};
+		ArrowEffects::GetXYZPos(m_pPlayerState, column_args.column, fYOffsetEnd, m_fYReverseOffsetPixels, end);
+
+		float width = fFrameWidth * ArrowEffects::GetFrameWidthScale(
+			m_pPlayerState, fYOffsetStart, part_args.overlapped_time);
+		float endWidth = fFrameWidth * ArrowEffects::GetFrameWidthScale(
+			m_pPlayerState, fYOffsetEnd, part_args.overlapped_time);
+
+		DEBUG_ASSERT(width == endWidth);
+		DEBUG_ASSERT(start.x == end.x);
+		if (start.x == end.x && width == endWidth) {
+			if (part_args.top_beat == part_args.bottom_beat) {
+				end.y += 1.0f;
+			}
+
+			auto fTexCoordTop = rect.top + add_to_tex_coord;
+
+			const auto fAlpha =
+				ArrowGetAlphaOrGlow(glow,
+									m_pPlayerState,
+									column_args.column,
+									(fYOffsetEnd + fYOffsetStart) * 0.5f,
+									part_args.percent_fade_to_fail,
+									m_fYReverseOffsetPixels,
+									field_args.draw_pixels_before_targets,
+									field_args.fade_before_targets);
+			const auto color = RageColor(column_args.diffuse.r * color_scale,
+										column_args.diffuse.g * color_scale,
+										column_args.diffuse.b * color_scale,
+										column_args.diffuse.a * fAlpha);
+
+			if (fAlpha > 0) {
+				const auto fDistFromTop = (y_end_pos - y_start_pos);
+				auto fTexCoordTop =
+					SCALE(fDistFromTop, 0, unzoomed_frame_height, rect.top, rect.bottom);
+				auto fTexCoordBottom = rect.top;
+				fTexCoordTop += add_to_tex_coord;
+				fTexCoordBottom += add_to_tex_coord;
+
+				// start and end can have very different values for z, which this
+				// quad discards. This doesnt seem to make a difference even with
+				// mods that affect perspective
+				RenderQuad quad = RenderQuad(width, end.y - start.y)
+					.Translate(start.x, start.y + (end.y - start.y) * 0.5)
+					.Color(color)
+					.Texture(vpSpr[0]->GetTexture()->GetTexHandle(),
+						RectF(rect.left, fTexCoordBottom, rect.right, fTexCoordTop))
+					.TextureWrapping(part_args.wrapping);
+
+				DISPLAY->PushQuad(quad);
+			}
+		} else {
+			no_funny_business = false;
+		}
+	}
+
+	if (no_funny_business) {
+		return;
+	}
+
 	// pos_z_vec will be used later to orient the hold.  Read below. -Kyz
 	static const RageVector3 pos_z_vec(0.0f, 0.0f, 1.0f);
 	static const RageVector3 pos_y_vec(0.0f, 1.0f, 0.0f);

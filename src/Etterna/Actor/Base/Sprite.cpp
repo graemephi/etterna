@@ -528,6 +528,7 @@ TexCoordArrayFromRect(float fImageCoords[8], const RectF& rect)
 void
 Sprite::DrawTexture(const TweenState* state)
 {
+#if 0
 	Actor::SetGlobalRenderStates(); // set Actor-specified render states
 
 	auto crop = state->crop;
@@ -680,6 +681,35 @@ Sprite::DrawTexture(const TweenState* state)
 
 	if (m_EffectMode != EffectMode_Normal)
 		DISPLAY->SetEffectMode(EffectMode_Normal);
+
+#else
+	// todo: support crop, and maybe m_bUsingCustomTexCoord and m_bUsingCustomPosCoords?
+
+	Actor::SetGlobalRenderStates();
+
+	RenderQuad quad = RenderQuad(m_size.x, m_size.y)
+	 	.Texture(m_pTexture != nullptr ? m_pTexture->GetTexHandle() : 0, *GetCurrentTextureCoordRect())
+		.Colors(state->diffuse)
+		.TextureWrapping(m_bTextureWrapping)
+		.TextureFiltering(m_bTextureFiltering);
+
+	if (state->diffuse[0].a > 0 || state->diffuse[1].a > 0 || state->diffuse[2].a > 0 || state->diffuse[3].a > 0) {
+		if (m_fShadowLengthX != 0 || m_fShadowLengthY != 0) {
+			RageVector2 v = RageVector2(m_fShadowLengthX, m_fShadowLengthY);
+			auto c = m_ShadowColor;
+			c.a *= state->diffuse[0].a;
+			DISPLAY->PushQuad(quad.Translate(v).Color(c).TextureMode(TextureMode_Modulate));
+		}
+
+		DISPLAY->PushQuad(quad);
+	}
+
+	if (state->glow.a > 0.0001f) {
+		DISPLAY->PushQuad(quad.Color(state->glow).TextureMode(TextureMode_Glow));
+	}
+
+	// D3D does not support EffectMode so this won't either
+#endif
 }
 
 bool

@@ -87,6 +87,9 @@ class LegacyDisplay : public RageDisplay
 
 	auto GetStats() const -> std::string override;
 
+	// New API
+	void PushQuads(RenderQuad q[], size_t numQuads) override;
+
   protected:
 	void DrawQuadsInternal(const RageSpriteVertex v[], int iNumVerts) override;
 	void DrawQuadStripInternal(const RageSpriteVertex v[], int iNumVerts) override;
