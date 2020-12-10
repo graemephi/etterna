@@ -86,7 +86,8 @@ struct RenderStateStats
 
 static RenderStateStats g_RenderStateStats = {};
 static std::unordered_map<intptr_t, intptr_t> g_SequentialTextureIDs;
-intptr_t SequentialTextureID(intptr_t id)
+intptr_t
+SequentialTextureID(intptr_t id)
 {
 	// Terrible std api: this line is the insertion
 	intptr_t result = g_SequentialTextureIDs[id];
@@ -115,28 +116,28 @@ blendModeCounts: {152, 0, 0, 0, 0, 0, 0, 0, 0, 0, 152}
 zTestModeCounts: {152, 152, 0}
 cullModeCounts: {0, 0, 0}
 textureCounts:
-    [00]: 377337
-    [01]: 411274
-    [02]: 26
-    [03]: 145066
-    [04]: 2
-    [05]: 51852
-    [06]: 113082
-    [07]: 89
-    [08]: 89
-    [09]: 165
-    [10]: 1699
-    [11]: 49369
-    [12]: 49369
-    [13]: 49368
-    [14]: 4058
-    [15]: 1290
-    [16]: 1290
-    [17]: 1290
-    [18]: 307
-    [19]: 307
-    [20]: 188
-    [21]: 0
+	[00]: 377337
+	[01]: 411274
+	[02]: 26
+	[03]: 145066
+	[04]: 2
+	[05]: 51852
+	[06]: 113082
+	[07]: 89
+	[08]: 89
+	[09]: 165
+	[10]: 1699
+	[11]: 49369
+	[12]: 49369
+	[13]: 49368
+	[14]: 4058
+	[15]: 1290
+	[16]: 1290
+	[17]: 1290
+	[18]: 307
+	[19]: 307
+	[20]: 188
+	[21]: 0
 */
 
 #define IncrementStatistic(field) g_RenderStateStats.field++
@@ -158,8 +159,7 @@ struct Command
 {
 	CommandType type;
 	int32_t sizeInBytes;
-	union
-	{
+	union {
 		CullMode cullMode;
 		ZTestMode zTestMode;
 		BlendMode blendMode;
@@ -190,20 +190,24 @@ struct CommandBuffer
 	void Push(Command command)
 	{
 		ASSERT_M(command.type != Command_Invalid, "No command set");
-		ASSERT_M(command.type != Command_Draw, "Use PushDrawCommand to push Command_Draw");
+		ASSERT_M(command.type != Command_Draw,
+				 "Use PushDrawCommand to push Command_Draw");
 		command.sizeInBytes = sizeof(Command);
-		copyIntoBuffer((uint8_t *)&command, sizeof(Command));
+		copyIntoBuffer((uint8_t*)&command, sizeof(Command));
 		numCommands += 1;
 	}
 
-	void PushDrawCommand(DrawMode mode, MatrixState m, uint8_t* vertex_data, size_t length)
+	void PushDrawCommand(DrawMode mode,
+						 MatrixState m,
+						 uint8_t* vertex_data,
+						 size_t length)
 	{
 		Command command = {};
 		command.type = Command_Draw;
 		command.sizeInBytes = sizeof(Command) + sizeof(MatrixState) + length;
 		command.drawMode = mode;
-		copyIntoBuffer((uint8_t *)&command, sizeof(Command));
-		copyIntoBuffer((uint8_t *)&m, sizeof(MatrixState));
+		copyIntoBuffer((uint8_t*)&command, sizeof(Command));
+		copyIntoBuffer((uint8_t*)&m, sizeof(MatrixState));
 		copyIntoBuffer(vertex_data, length);
 		numCommands += 1;
 	}
@@ -225,7 +229,8 @@ struct CommandBuffer
 
 static CommandBuffer g_CommandBuffer;
 
-void LegacyDisplay::DumpMatrices(MatrixState& m)
+void
+LegacyDisplay::DumpMatrices(MatrixState& m)
 {
 	m.projection = *DISPLAY->GetProjectionTop();
 	m.view = *DISPLAY->GetViewTop();
@@ -234,8 +239,7 @@ void LegacyDisplay::DumpMatrices(MatrixState& m)
 }
 
 auto
-LegacyDisplay::BeginFrame()
-	-> bool
+LegacyDisplay::BeginFrame() -> bool
 {
 	g_CommandBuffer.Clear();
 	g_RenderState.cullMode = CULL_NONE;
@@ -257,12 +261,15 @@ LegacyDisplay::EndFrame()
 	auto endFrameTime = std::chrono::steady_clock::now();
 
 	IncrementStatistic(frames);
-	MatrixState m; DumpMatrices(m);
+	MatrixState m;
+	DumpMatrices(m);
 
-	uint8_t *cursor = &g_CommandBuffer.buffer[0];
+	uint8_t* cursor = &g_CommandBuffer.buffer[0];
 	for (size_t i = 0; i < g_CommandBuffer.numCommands; i++) {
-		ASSERT_M((cursor - &g_CommandBuffer.buffer[0]) < (ptrdiff_t)g_CommandBuffer.buffer.size(), "LegacyDisplay: Bad command buffer");
-		Command *command = (Command *)cursor;
+		ASSERT_M((cursor - &g_CommandBuffer.buffer[0]) <
+				   (ptrdiff_t)g_CommandBuffer.buffer.size(),
+				 "LegacyDisplay: Bad command buffer");
+		Command* command = (Command*)cursor;
 
 		switch (command->type) {
 			case Command_ClearZBuffer: {
@@ -287,36 +294,43 @@ LegacyDisplay::EndFrame()
 				m_display->SetAlphaTest(command->alphaTest);
 			} break;
 			case Command_SetTexture: {
-				m_display->SetTexture(command->texture.handle, command->texture.value);
+				m_display->SetTexture(command->texture.handle,
+									  command->texture.value);
 			} break;
 			case Command_SetTextureMode: {
-				m_display->SetTextureMode(command->texture.handle, (TextureMode)command->texture.value);
+				m_display->SetTextureMode(command->texture.handle,
+										  (TextureMode)command->texture.value);
 			} break;
 			case Command_SetTextureFiltering: {
-				m_display->SetTextureFiltering(command->texture.handle, command->texture.value);
+				m_display->SetTextureFiltering(command->texture.handle,
+											   command->texture.value);
 			} break;
 			case Command_SetTextureWrapping: {
-				m_display->SetTextureWrapping(command->texture.handle, command->texture.value);
+				m_display->SetTextureWrapping(command->texture.handle,
+											  command->texture.value);
 			} break;
 			case Command_Draw: {
 				// Ugly but no point in doing better
-				DrawCommand *dc = (DrawCommand *)cursor;
-				int32_t numVertices = (command->sizeInBytes - sizeof(Command) - sizeof(MatrixState)) / sizeof(RageSpriteVertex);
-				RageSpriteVertex *vertexData = dc->verts;
+				DrawCommand* dc = (DrawCommand*)cursor;
+				int32_t numVertices = (command->sizeInBytes - sizeof(Command) -
+									   sizeof(MatrixState)) /
+									  sizeof(RageSpriteVertex);
+				RageSpriteVertex* vertexData = dc->verts;
 				const MatrixState& m = dc->matrices;
 
 				// We could push and pop here like good citizens, but we won't
-				*(RageMatrix *)DISPLAY->GetProjectionTop() = m.projection;
-				*(RageMatrix *)DISPLAY->GetViewTop() = m.view;
-				*(RageMatrix *)DISPLAY->GetWorldTop() = m.world;
-				*(RageMatrix *)DISPLAY->GetTextureTop() = m.texture;
+				*(RageMatrix*)DISPLAY->GetProjectionTop() = m.projection;
+				*(RageMatrix*)DISPLAY->GetViewTop() = m.view;
+				*(RageMatrix*)DISPLAY->GetWorldTop() = m.world;
+				*(RageMatrix*)DISPLAY->GetTextureTop() = m.texture;
 
 				switch (command->drawMode) {
 					case DrawMode_Quads: {
 						m_display->DrawQuadsInternal(vertexData, numVertices);
 					} break;
 					case DrawMode_QuadStrip: {
-						m_display->DrawQuadStripInternal(vertexData, numVertices);
+						m_display->DrawQuadStripInternal(vertexData,
+														 numVertices);
 					} break;
 					case DrawMode_Fan: {
 						m_display->DrawFanInternal(vertexData, numVertices);
@@ -325,10 +339,12 @@ LegacyDisplay::EndFrame()
 						m_display->DrawStripInternal(vertexData, numVertices);
 					} break;
 					case DrawMode_Triangles: {
-						m_display->DrawTrianglesInternal(vertexData, numVertices);
+						m_display->DrawTrianglesInternal(vertexData,
+														 numVertices);
 					} break;
 					case DrawMode_SymmetricQuadStrip: {
-						m_display->DrawSymmetricQuadStripInternal(vertexData, numVertices);
+						m_display->DrawSymmetricQuadStripInternal(vertexData,
+																  numVertices);
 					} break;
 					case DrawMode_CompiledGeometry: {
 						FAIL_M("Never used?");
@@ -346,10 +362,10 @@ LegacyDisplay::EndFrame()
 		cursor += command->sizeInBytes;
 	}
 
-	*(RageMatrix *)DISPLAY->GetProjectionTop() = m.projection;
-	*(RageMatrix *)DISPLAY->GetViewTop() = m.view;
-	*(RageMatrix *)DISPLAY->GetWorldTop() = m.world;
-	*(RageMatrix *)DISPLAY->GetTextureTop() = m.texture;
+	*(RageMatrix*)DISPLAY->GetProjectionTop() = m.projection;
+	*(RageMatrix*)DISPLAY->GetViewTop() = m.view;
+	*(RageMatrix*)DISPLAY->GetWorldTop() = m.world;
+	*(RageMatrix*)DISPLAY->GetTextureTop() = m.texture;
 
 	auto endDriverTime = std::chrono::steady_clock::now();
 
@@ -524,66 +540,80 @@ void
 LegacyDisplay::DrawQuadsInternal(const RageSpriteVertex v[], int iNumVerts)
 {
 	IncrementStatistic(DrawQuads);
-	MatrixState m; DumpMatrices(m);
-	g_CommandBuffer.PushDrawCommand(DrawMode_Quads, m, (uint8_t *)v, iNumVerts * sizeof(RageSpriteVertex));
+	MatrixState m;
+	DumpMatrices(m);
+	g_CommandBuffer.PushDrawCommand(
+	  DrawMode_Quads, m, (uint8_t*)v, iNumVerts * sizeof(RageSpriteVertex));
 }
 
 void
 LegacyDisplay::DrawQuadStripInternal(const RageSpriteVertex v[], int iNumVerts)
 {
 	IncrementStatistic(DrawQuadStrip);
-	MatrixState m; DumpMatrices(m);
-	g_CommandBuffer.PushDrawCommand(DrawMode_QuadStrip, m, (uint8_t *)v, iNumVerts * sizeof(RageSpriteVertex));
+	MatrixState m;
+	DumpMatrices(m);
+	g_CommandBuffer.PushDrawCommand(
+	  DrawMode_QuadStrip, m, (uint8_t*)v, iNumVerts * sizeof(RageSpriteVertex));
 }
 
 void
-LegacyDisplay::DrawSymmetricQuadStripInternal(const RageSpriteVertex v[], int iNumVerts)
+LegacyDisplay::DrawSymmetricQuadStripInternal(const RageSpriteVertex v[],
+											  int iNumVerts)
 {
 	IncrementStatistic(DrawSymmetricQuadStrip);
-	MatrixState m; DumpMatrices(m);
-	g_CommandBuffer.PushDrawCommand(DrawMode_SymmetricQuadStrip, m, (uint8_t *)v, iNumVerts * sizeof(RageSpriteVertex));
+	MatrixState m;
+	DumpMatrices(m);
+	g_CommandBuffer.PushDrawCommand(DrawMode_SymmetricQuadStrip,
+									m,
+									(uint8_t*)v,
+									iNumVerts * sizeof(RageSpriteVertex));
 }
 
 void
 LegacyDisplay::DrawFanInternal(const RageSpriteVertex v[], int iNumVerts)
 {
 	IncrementStatistic(DrawFan);
-	MatrixState m; DumpMatrices(m);
-	g_CommandBuffer.PushDrawCommand(DrawMode_Fan, m, (uint8_t *)v, iNumVerts * sizeof(RageSpriteVertex));
+	MatrixState m;
+	DumpMatrices(m);
+	g_CommandBuffer.PushDrawCommand(
+	  DrawMode_Fan, m, (uint8_t*)v, iNumVerts * sizeof(RageSpriteVertex));
 }
 
 void
 LegacyDisplay::DrawStripInternal(const RageSpriteVertex v[], int iNumVerts)
 {
 	IncrementStatistic(DrawStrip);
-	MatrixState m; DumpMatrices(m);
-	g_CommandBuffer.PushDrawCommand(DrawMode_Strip, m, (uint8_t *)v, iNumVerts * sizeof(RageSpriteVertex));
+	MatrixState m;
+	DumpMatrices(m);
+	g_CommandBuffer.PushDrawCommand(
+	  DrawMode_Strip, m, (uint8_t*)v, iNumVerts * sizeof(RageSpriteVertex));
 }
 
 void
 LegacyDisplay::DrawTrianglesInternal(const RageSpriteVertex v[], int iNumVerts)
 {
 	IncrementStatistic(DrawTriangles);
-	MatrixState m; DumpMatrices(m);
-	g_CommandBuffer.PushDrawCommand(DrawMode_Triangles, m, (uint8_t *)v, iNumVerts * sizeof(RageSpriteVertex));
+	MatrixState m;
+	DumpMatrices(m);
+	g_CommandBuffer.PushDrawCommand(
+	  DrawMode_Triangles, m, (uint8_t*)v, iNumVerts * sizeof(RageSpriteVertex));
 }
 
 void
-LegacyDisplay::DrawCompiledGeometryInternal(const RageCompiledGeometry* p, int iMeshIndex)
+LegacyDisplay::DrawCompiledGeometryInternal(const RageCompiledGeometry* p,
+											int iMeshIndex)
 {
 	FAIL_M("Never called?");
 }
 
 auto
-LegacyDisplay::IsZWriteEnabled() const
-	-> bool
+LegacyDisplay::IsZWriteEnabled() const -> bool
 {
 	FAIL_M("Never called?");
 }
 
 auto
-LegacyDisplay::IsZTestEnabled() const
-	-> bool
+LegacyDisplay::IsZTestEnabled() const -> bool
 {
 	FAIL_M("Never called?");
 }
@@ -608,10 +638,16 @@ LegacyDisplay::PushQuads(RenderQuad q[], size_t numQuads)
 	for (size_t i = 0; i < numQuads; i++) {
 		const auto& quad = q[i];
 
-		ASSERT_M(quad.texture == firstTexture, "Multiple textures in one PushQuads is not implemented");
-		ASSERT_M(quad.textureMode == firstTextureMode, "Multiple texture modes in one PushQuads is not implemented");
-		ASSERT_M(quad.textureWrapping == firstTextureWrapping, "Multiple texture wrappings in one PushQuads is not implemented");
-		ASSERT_M(quad.textureFiltering == firstTextureFiltering, "Multiple texture filterings in one PushQuads is not implemented");
+		ASSERT_M(quad.texture == 0 || quad.texture == firstTexture,
+				 "Multiple textures in one PushQuads is not implemented");
+		ASSERT_M(quad.texture == 0 || quad.textureMode == firstTextureMode,
+				 "Multiple texture modes in one PushQuads is not implemented");
+		ASSERT_M(
+		  quad.texture == 0 || quad.textureWrapping == firstTextureWrapping,
+		  "Multiple texture wrappings in one PushQuads is not implemented");
+		ASSERT_M(
+		  quad.texture == 0 || quad.textureFiltering == firstTextureFiltering,
+		  "Multiple texture filterings in one PushQuads is not implemented");
 
 		v[0].p = RageVector3(quad.rect.left, quad.rect.top, 0);
 		v[1].p = RageVector3(quad.rect.left, quad.rect.bottom, 0);
@@ -636,15 +672,16 @@ LegacyDisplay::PushQuads(RenderQuad q[], size_t numQuads)
 
 // All functions below are forwarded to the underlying display immediately.
 
-auto LegacyDisplay::GetPixelFormatDesc(RagePixelFormat pf) const
-	-> const RagePixelFormatDesc*
+auto
+LegacyDisplay::GetPixelFormatDesc(RagePixelFormat pf) const
+  -> const RagePixelFormatDesc*
 {
 	return m_display->GetPixelFormatDesc(pf);
 }
 
 auto
 LegacyDisplay::Init(const VideoModeParams& p, bool bAllowUnacceleratedRenderer)
-	-> std::string
+  -> std::string
 {
 	return m_display->Init(p, bAllowUnacceleratedRenderer);
 }
@@ -669,43 +706,38 @@ LegacyDisplay::ResolutionChanged()
 }
 
 auto
-LegacyDisplay::GetMaxTextureSize() const
-	-> int
+LegacyDisplay::GetMaxTextureSize() const -> int
 {
 	return m_display->GetMaxTextureSize();
 }
 
 auto
 LegacyDisplay::SupportsTextureFormat(RagePixelFormat pixfmt, bool realtime)
-	-> bool
+  -> bool
 {
 	return m_display->SupportsTextureFormat(pixfmt, realtime);
 }
 
 auto
-LegacyDisplay::SupportsThreadedRendering()
-	-> bool
+LegacyDisplay::SupportsThreadedRendering() -> bool
 {
 	return m_display->SupportsThreadedRendering();
 }
 
 auto
-LegacyDisplay::CreateScreenshot()
-	-> RageSurface*
+LegacyDisplay::CreateScreenshot() -> RageSurface*
 {
 	return m_display->CreateScreenshot();
 }
 
 auto
-LegacyDisplay::GetActualVideoModeParams() const
-	-> const ActualVideoModeParams*
+LegacyDisplay::GetActualVideoModeParams() const -> const ActualVideoModeParams*
 {
 	return m_display->GetActualVideoModeParams();
 }
 
 auto
-LegacyDisplay::CreateCompiledGeometry()
-	-> RageCompiledGeometry*
+LegacyDisplay::CreateCompiledGeometry() -> RageCompiledGeometry*
 {
 	FAIL_M("Never called?");
 	return m_display->CreateCompiledGeometry();
@@ -726,14 +758,17 @@ LegacyDisplay::ClearAllTextures()
 }
 
 auto
-LegacyDisplay::GetNumTextureUnits()
-	-> int
+LegacyDisplay::GetNumTextureUnits() -> int
 {
 	return m_display->GetNumTextureUnits();
 }
 
 void
-LegacyDisplay::SetMaterial(const RageColor& emissive, const RageColor& ambient, const RageColor& diffuse, const RageColor& specular, float shininess)
+LegacyDisplay::SetMaterial(const RageColor& emissive,
+						   const RageColor& ambient,
+						   const RageColor& diffuse,
+						   const RageColor& specular,
+						   float shininess)
 {
 	FAIL_M("Never called?");
 }
@@ -751,7 +786,11 @@ LegacyDisplay::SetLightOff(int index)
 }
 
 void
-LegacyDisplay::SetLightDirectional(int index, const RageColor& ambient, const RageColor& diffuse, const RageColor& specular, const RageVector3& dir)
+LegacyDisplay::SetLightDirectional(int index,
+								   const RageColor& ambient,
+								   const RageColor& diffuse,
+								   const RageColor& specular,
+								   const RageVector3& dir)
 {
 	FAIL_M("Never called?");
 }
@@ -763,29 +802,37 @@ LegacyDisplay::DeleteTexture(intptr_t iTexHandle)
 }
 
 auto
-LegacyDisplay::CreateTexture(RagePixelFormat pixfmt, RageSurface* img, bool bGenerateMipMaps)
-	-> intptr_t
+LegacyDisplay::CreateTexture(RagePixelFormat pixfmt,
+							 RageSurface* img,
+							 bool bGenerateMipMaps) -> intptr_t
 {
 	return m_display->CreateTexture(pixfmt, img, bGenerateMipMaps);
 }
 
 void
-LegacyDisplay::UpdateTexture(intptr_t uTexHandle, RageSurface* img, int xoffset, int yoffset, int width, int height)
+LegacyDisplay::UpdateTexture(intptr_t uTexHandle,
+							 RageSurface* img,
+							 int xoffset,
+							 int yoffset,
+							 int width,
+							 int height)
 {
-	return m_display->UpdateTexture(uTexHandle, img, xoffset, yoffset, width, height);
+	return m_display->UpdateTexture(
+	  uTexHandle, img, xoffset, yoffset, width, height);
 }
 
 auto
-LegacyDisplay::CreateRenderTarget(const RenderTargetParam& param, int& iTextureWidthOut, int& iTextureHeightOut)
-	-> intptr_t
+LegacyDisplay::CreateRenderTarget(const RenderTargetParam& param,
+								  int& iTextureWidthOut,
+								  int& iTextureHeightOut) -> intptr_t
 {
 	FAIL_M("Never called?");
-	return m_display->CreateRenderTarget(param, iTextureWidthOut, iTextureHeightOut);
+	return m_display->CreateRenderTarget(
+	  param, iTextureWidthOut, iTextureHeightOut);
 }
 
 auto
-LegacyDisplay::GetRenderTarget()
-	-> intptr_t
+LegacyDisplay::GetRenderTarget() -> intptr_t
 {
 	FAIL_M("Never called?");
 	return m_display->GetRenderTarget();
@@ -813,8 +860,7 @@ LegacyDisplay::SetCelShaded(int stage)
 }
 
 auto
-LegacyDisplay::IsD3DInternal()
-	-> bool
+LegacyDisplay::IsD3DInternal() -> bool
 {
 	FAIL_M("Never called?");
 	return m_display->IsD3DInternal();

@@ -7,6 +7,7 @@
 #include "RageUtil/Misc/RageTypes.h"
 
 // New API thing--temporarily going here instead of dealing with c++
+// Note: terrible code gen
 struct RenderQuad
 {
 	RectF rect;
@@ -21,7 +22,8 @@ struct RenderQuad
 	bool textureFiltering = true;
 
 	RenderQuad() = default;
-	RenderQuad(float x, float y) : rect(x * -0.5, y * -0.5, x * 0.5, y * 0.5) {};
+	RenderQuad(float x, float y)
+	  : rect(x * -0.5f, y * -0.5f, x * 0.5f, y * 0.5f){};
 
 	auto Rect(RectF rect) const -> RenderQuad
 	{
@@ -32,10 +34,10 @@ struct RenderQuad
 	auto Colors(const RageColor colors[4]) const -> RenderQuad
 	{
 		RenderQuad q = *this;
-		q.colors[0] = colors[0];
-		q.colors[1] = colors[2];
-		q.colors[2] = colors[3];
-		q.colors[3] = colors[1];
+		q.colors[0] = colors[0]; // top left
+		q.colors[1] = colors[2]; // bottom left
+		q.colors[2] = colors[3]; // bottom right
+		q.colors[3] = colors[1]; // top right
 		return q;
 	}
 	auto Color(RageColor c) const -> RenderQuad
@@ -118,11 +120,13 @@ class RageCompiledGeometry
 
 	void Set(const std::vector<msMesh>& vMeshes, bool bNeedsNormals);
 
-	virtual void Allocate(const std::vector<msMesh>& vMeshes) = 0; // allocate space
-	virtual void Change(const std::vector<msMesh>& vMeshes) = 0; // new data must be
-															// the same size as
-															// was passed to
-															// Set()
+	virtual void Allocate(
+	  const std::vector<msMesh>& vMeshes) = 0; // allocate space
+	virtual void Change(
+	  const std::vector<msMesh>& vMeshes) = 0; // new data must be
+											   // the same size as
+											   // was passed to
+											   // Set()
 	virtual void Draw(int iMeshIndex) const = 0;
 
   protected:

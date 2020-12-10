@@ -3,6 +3,9 @@
 
 #include "Actor.h"
 
+// for RenderQuad -- temp location
+#include "RageUtil/Graphics/RageDisplay.h"
+
 class RageTexture;
 class Font;
 struct FontPageTextures;
@@ -150,7 +153,8 @@ class BitmapText : public Actor
 	// Commands
 	void PushSelf(lua_State* L) override;
 
-	std::vector<RageSpriteVertex> m_aVertices;
+	std::vector<RenderQuad> m_aQuads;
+	std::vector<RenderQuad> m_aQuadsClean;
 
   protected:
 	Font* m_pFont;
