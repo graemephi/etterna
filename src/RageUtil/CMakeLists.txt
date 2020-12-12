@@ -67,6 +67,7 @@ list(APPEND SMDATA_RAGE_GRAPHICS_SRC
   "Graphics/RageTextureRenderTarget.cpp"
 
   "Graphics/LegacyDisplay.cpp"
+  "Graphics/Display_VK.cpp"
 )
 list(APPEND SMDATA_RAGE_GRAPHICS_HPP
   "Graphics/RageBitmapTexture.h"
@@ -91,6 +92,7 @@ list(APPEND SMDATA_RAGE_GRAPHICS_HPP
   "Graphics/RageTextureRenderTarget.h"
 
   "Graphics/LegacyDisplay.h"
+  "Graphics/Display_VK.h"
 )
 
 if(WIN32)

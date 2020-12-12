@@ -7,7 +7,6 @@
 #include "RageUtil/Misc/RageTypes.h"
 
 // New API thing--temporarily going here instead of dealing with c++
-// Note: terrible code gen
 struct RenderQuad
 {
 	RectF rect;

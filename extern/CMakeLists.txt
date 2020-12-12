@@ -37,6 +37,8 @@ add_subdirectory(discord-rpc)
 ## Header Only
 add_subdirectory(rapidjson)
 add_subdirectory(stb)
+add_subdirectory(Vulkan-Headers)
+add_subdirectory(volk)
 
 ## Remaining Libraries
 add_subdirectory(LuaJIT-2.1.0-beta3)
@@ -70,7 +72,8 @@ list(APPEND EXT_TARGETS
     discord-rpc muFFT
     zlib libmad pcre
     ogg vorbis glfw
-    libcurl fmt)
+    libcurl fmt
+    Vulkan-Headers volk)
 
 list(APPEND LUA_TARGETS luajit lua minilua buildvm)
 
