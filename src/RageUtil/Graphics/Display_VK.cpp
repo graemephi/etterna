@@ -22,7 +22,39 @@
 #include "volk.h"
 #include "vulkan/vulkan.h"
 
+#define VMA_IMPLEMENTATION
+#include "vk_mem_alloc.h"
+
 #include "Display_VK_shaders.h"
+
+struct Buffer
+{
+	static const size_t Size = 65536;
+
+	VkBuffer buffer;
+	VmaAllocation allocation;
+	void* mappedMemory;
+};
+
+struct QuadsProgram
+{
+	struct Quad
+	{
+		RectF rect;
+		RageColor colors[4];
+		RectF tex;
+	};
+
+	std::vector<Quad> quads;
+	std::vector<uint16_t> indices;
+
+	VkShaderModule vertexShader;
+	VkShaderModule fragmentShader;
+	VkPipelineLayout pipelineLayout;
+	VkDescriptorSet descriptorSet;
+	Buffer quadsBuffer;
+	Buffer indexBuffer;
+};
 
 struct Swapchain
 {
@@ -48,8 +80,11 @@ static struct VulkanState
 	VkDevice device;
 	VkCommandPool commandPool;
 	VkCommandBuffer commandBuffer;
+	VkDescriptorPool descriptorPool;
 	uint32_t queueFamilyIndex;
 	VkQueue queue;
+
+	VmaAllocator allocator;
 
 	VkSurfaceKHR surface;
 	Swapchain swapchain;
@@ -60,12 +95,7 @@ static struct VulkanState
 		VkSemaphore acquire;
 	} sem;
 
-	struct
-	{
-		VkShaderModule vertex_shader;
-		VkShaderModule fragment_shader;
-		VkPipelineLayout pipelineLayout;
-	} quads;
+	QuadsProgram quads;
 
 	uint32_t frameImageIndex;
 } g_vk = {};
@@ -78,7 +108,13 @@ DebugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
 {
 	DEBUG_ASSERT(
 	  (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) == 0);
-	printf("%s\n", pCallbackData->pMessage);
+	// Filter "Device Extension" message spam
+	if (strncmp(pCallbackData->pMessage, "Device Extension", 16) != 0) {
+		printf("%s\n", pCallbackData->pMessage);
+		// Flush immediately because of BAD DEBUGGERS THAT TRUNCATE STRINGS FOR
+		// DISPLAY HELLO
+		fflush(0);
+	}
 	return VK_FALSE;
 }
 
@@ -184,12 +220,14 @@ CreateSwapchain(Swapchain& swapchain, VkSwapchainKHR oldSwapchain = 0)
 
 	// Create swap chain
 	{
-		// clang-format off
-        VkCompositeAlphaFlagBitsKHR compositeAlpha =
-            (surfaceCapabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) ? VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR
-          : (surfaceCapabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR) ? VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR
-          : VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
-		// clang-format on
+		VkCompositeAlphaFlagBitsKHR compositeAlpha =
+		  VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+		const auto& scaFlags = surfaceCapabilities.supportedCompositeAlpha;
+		if (scaFlags & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) {
+			compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+		} else if (scaFlags & VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR) {
+			compositeAlpha = VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
+		}
 
 		VkSwapchainCreateInfoKHR swapchainInfo = {
 			VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR
@@ -333,7 +371,7 @@ CreateSwapchain(Swapchain& swapchain, VkSwapchainKHR oldSwapchain = 0)
 		}
 	}
 
-	// Create graphics pipeline
+	// Create graphics pipeline for quads
 	{
 		VkGraphicsPipelineCreateInfo pipelineInfo = {
 			VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO
@@ -346,13 +384,13 @@ CreateSwapchain(Swapchain& swapchain, VkSwapchainKHR oldSwapchain = 0)
 		vertStageInfo.sType =
 		  VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 		vertStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
-		vertStageInfo.module = g_vk.quads.vertex_shader;
+		vertStageInfo.module = g_vk.quads.vertexShader;
 		vertStageInfo.pName = "main";
 
 		fragStageInfo.sType =
 		  VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 		fragStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-		fragStageInfo.module = g_vk.quads.fragment_shader;
+		fragStageInfo.module = g_vk.quads.fragmentShader;
 		fragStageInfo.pName = "main";
 
 		pipelineInfo.stageCount = 2;
@@ -429,10 +467,6 @@ CreateSwapchain(Swapchain& swapchain, VkSwapchainKHR oldSwapchain = 0)
 		};
 		pipelineInfo.pDynamicState = &dynamicInfo;
 
-		if (rc != VK_SUCCESS) {
-			goto bail;
-		}
-
 		pipelineInfo.layout = g_vk.quads.pipelineLayout;
 		pipelineInfo.renderPass = swapchain.renderPass;
 
@@ -456,11 +490,159 @@ bail:
 void
 RecreateSwapchain(Swapchain& swapchain)
 {
+	// Create a new swapchain first so the driver can reuse resources, then
+	// destroy the old swapchain.
 	Swapchain newSwapchain{};
-	CreateSwapchain(newSwapchain, swapchain.swapchain);
+	VkResult rc = CreateSwapchain(newSwapchain, swapchain.swapchain);
+
+	if (rc != VK_SUCCESS) {
+		FAIL_M("Display_VK: failed to recreate swapchain");
+	}
+
 	vkDeviceWaitIdle(g_vk.device);
 	DestroySwapchain(swapchain);
 	swapchain = newSwapchain;
+}
+
+auto
+CreatePersistentlyMappedBuffer(Buffer& buffer, VkBufferUsageFlags bufferUsage)
+  -> VkResult
+{
+	VmaAllocationCreateInfo allocCreateInfo = {};
+	allocCreateInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+	allocCreateInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+
+	VkBufferCreateInfo bufferInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+	bufferInfo.size = Buffer::Size;
+	bufferInfo.usage = bufferUsage;
+
+	VmaAllocationInfo allocInfo = {};
+	VkResult rc = vmaCreateBuffer(g_vk.allocator,
+								  &bufferInfo,
+								  &allocCreateInfo,
+								  &buffer.buffer,
+								  &buffer.allocation,
+								  &allocInfo);
+	DEBUG_ASSERT(buffer.buffer);
+
+	buffer.mappedMemory = allocInfo.pMappedData;
+	return rc;
+}
+
+auto
+CreateQuadsProgram(QuadsProgram& quads) -> VkResult
+{
+	// Shaders
+	VkShaderModuleCreateInfo vertexInfo = {
+		VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO
+	};
+	vertexInfo.codeSize = sizeof(Display_VK_quads_vert);
+	vertexInfo.pCode = (uint32_t*)Display_VK_quads_vert;
+
+	VkResult rc =
+	  vkCreateShaderModule(g_vk.device, &vertexInfo, 0, &quads.vertexShader);
+	DEBUG_ASSERT(quads.vertexShader);
+
+	if (rc != VK_SUCCESS) {
+		return rc;
+	}
+
+	VkShaderModuleCreateInfo fragmentInfo = {
+		VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO
+	};
+	fragmentInfo.codeSize = sizeof(Display_VK_quads_frag);
+	fragmentInfo.pCode = (uint32_t*)Display_VK_quads_frag;
+
+	rc = vkCreateShaderModule(
+	  g_vk.device, &fragmentInfo, 0, &quads.fragmentShader);
+	DEBUG_ASSERT(quads.fragmentShader);
+
+	if (rc != VK_SUCCESS) {
+		return rc;
+	}
+
+	// Pipeline layout
+	VkDescriptorSetLayoutBinding setLayoutBinding = {};
+	setLayoutBinding.binding = 0;
+	setLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	setLayoutBinding.descriptorCount = 1;
+	setLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+	VkDescriptorSetLayoutCreateInfo setLayoutInfo = {
+		VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO
+	};
+	setLayoutInfo.bindingCount = 1;
+	setLayoutInfo.pBindings = &setLayoutBinding;
+
+	VkDescriptorSetLayout setLayout = 0;
+	rc =
+	  vkCreateDescriptorSetLayout(g_vk.device, &setLayoutInfo, 0, &setLayout);
+
+	if (rc != VK_SUCCESS) {
+		return rc;
+	}
+
+	VkDescriptorSetAllocateInfo setAllocateInfo = {
+		VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO
+	};
+	setAllocateInfo.descriptorPool = g_vk.descriptorPool;
+	setAllocateInfo.descriptorSetCount = 1;
+	setAllocateInfo.pSetLayouts = &setLayout;
+
+	rc = vkAllocateDescriptorSets(
+	  g_vk.device, &setAllocateInfo, &quads.descriptorSet);
+
+	if (rc != VK_SUCCESS) {
+		return rc;
+	}
+
+	VkPipelineLayoutCreateInfo layoutInfo = {
+		VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO
+	};
+	layoutInfo.pSetLayouts = &setLayout;
+	layoutInfo.setLayoutCount = 1;
+	rc = vkCreatePipelineLayout(
+	  g_vk.device, &layoutInfo, 0, &quads.pipelineLayout);
+	DEBUG_ASSERT(quads.pipelineLayout);
+
+	if (rc != VK_SUCCESS) {
+		return rc;
+	}
+
+	// Buffers
+	rc = CreatePersistentlyMappedBuffer(quads.quadsBuffer,
+										VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+	DEBUG_ASSERT(quads.quadsBuffer.buffer);
+
+	if (rc != VK_SUCCESS) {
+		return rc;
+	}
+
+	rc = CreatePersistentlyMappedBuffer(quads.indexBuffer,
+										VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+	DEBUG_ASSERT(quads.indexBuffer.buffer);
+
+	if (rc != VK_SUCCESS) {
+		return rc;
+	}
+
+	VkDescriptorBufferInfo bufferInfo = {};
+	bufferInfo.buffer = g_vk.quads.quadsBuffer.buffer;
+	bufferInfo.range = VK_WHOLE_SIZE;
+
+	VkWriteDescriptorSet writeDescriptorSet = {
+		VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET
+	};
+	writeDescriptorSet.dstSet = g_vk.quads.descriptorSet;
+	writeDescriptorSet.descriptorCount = 1;
+	writeDescriptorSet.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	writeDescriptorSet.pBufferInfo = &bufferInfo;
+
+	vkUpdateDescriptorSets(g_vk.device, 1, &writeDescriptorSet, 0, 0);
+
+	vkDestroyDescriptorSetLayout(g_vk.device, setLayout, 0);
+
+	return rc;
 }
 
 auto
@@ -652,6 +834,17 @@ Display_VK::Init(const VideoModeParams& p, bool bAllowUnacceleratedRenderer)
 		DEBUG_ASSERT(g_vk.queue);
 	}
 
+	// Initialize VulkanMemoryAllocator
+	{
+		VmaAllocatorCreateInfo allocatorInfo = {};
+		allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_1;
+		allocatorInfo.physicalDevice = g_vk.physicalDevice;
+		allocatorInfo.device = g_vk.device;
+		allocatorInfo.instance = g_vk.instance;
+
+		vmaCreateAllocator(&allocatorInfo, &g_vk.allocator);
+	}
+
 	// Create semaphores
 	{
 		VkSemaphoreCreateInfo semaphoreInfo = {
@@ -706,46 +899,31 @@ Display_VK::Init(const VideoModeParams& p, bool bAllowUnacceleratedRenderer)
 		}
 	}
 
-	// Create shaders
+	// Create descriptor pool
 	{
-		VkShaderModuleCreateInfo vertexInfo = {
-			VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO
-		};
-		vertexInfo.codeSize = sizeof(Display_VK_quads_vert);
-		vertexInfo.pCode = (uint32_t*)Display_VK_quads_vert;
+		VkDescriptorPoolSize poolSizes[1] = {};
+		poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		poolSizes[0].descriptorCount = 1;
 
-		rc = vkCreateShaderModule(
-		  g_vk.device, &vertexInfo, 0, &g_vk.quads.vertex_shader);
-		DEBUG_ASSERT(g_vk.quads.vertex_shader);
+		VkDescriptorPoolCreateInfo descriptorPoolInfo = {
+			VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO
+		};
+		descriptorPoolInfo.poolSizeCount = 1;
+		descriptorPoolInfo.pPoolSizes = poolSizes;
+		descriptorPoolInfo.maxSets = 1;
+
+		rc = vkCreateDescriptorPool(
+		  g_vk.device, &descriptorPoolInfo, 0, &g_vk.descriptorPool);
 
 		if (rc != VK_SUCCESS) {
 			goto bail;
 		}
+	}
 
-		VkShaderModuleCreateInfo fragmentInfo = {
-			VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO
-		};
-		fragmentInfo.codeSize = sizeof(Display_VK_quads_frag);
-		fragmentInfo.pCode = (uint32_t*)Display_VK_quads_frag;
+	rc = CreateQuadsProgram(g_vk.quads);
 
-		rc = vkCreateShaderModule(
-		  g_vk.device, &fragmentInfo, 0, &g_vk.quads.fragment_shader);
-		DEBUG_ASSERT(g_vk.quads.fragment_shader);
-
-		if (rc != VK_SUCCESS) {
-			goto bail;
-		}
-
-		VkPipelineLayoutCreateInfo layoutInfo = {
-			VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO
-		};
-		rc = vkCreatePipelineLayout(
-		  g_vk.device, &layoutInfo, 0, &g_vk.quads.pipelineLayout);
-		DEBUG_ASSERT(g_vk.quads.pipelineLayout);
-
-		if (rc != VK_SUCCESS) {
-			goto bail;
-		}
+	if (rc != VK_SUCCESS) {
+		goto bail;
 	}
 
 	// Rest of the initialization happens in TryVideoMode
@@ -756,15 +934,35 @@ Display_VK::Init(const VideoModeParams& p, bool bAllowUnacceleratedRenderer)
 bail:
 	// "All child objects created using instance must have been destroyed prior
 	// to destroying instance" whats the worse that could happen
+	if (g_vk.quads.indexBuffer.buffer) {
+		vmaDestroyBuffer(g_vk.allocator,
+						 g_vk.quads.indexBuffer.buffer,
+						 g_vk.quads.indexBuffer.allocation);
+		g_vk.quads.indexBuffer.buffer = 0;
+		g_vk.quads.indexBuffer.allocation = 0;
+	}
+	if (g_vk.quads.quadsBuffer.buffer) {
+		vmaDestroyBuffer(g_vk.allocator,
+						 g_vk.quads.quadsBuffer.buffer,
+						 g_vk.quads.quadsBuffer.allocation);
+		g_vk.quads.quadsBuffer.buffer = 0;
+		g_vk.quads.quadsBuffer.allocation = 0;
+	}
 	if (g_vk.quads.pipelineLayout) {
 		vkDestroyPipelineLayout(g_vk.device, g_vk.quads.pipelineLayout, 0);
 		g_vk.quads.pipelineLayout = 0;
 	}
-	if (g_vk.quads.vertex_shader) {
-		vkDestroyShaderModule(g_vk.device, g_vk.quads.vertex_shader, 0);
+	if (g_vk.quads.vertexShader) {
+		vkDestroyShaderModule(g_vk.device, g_vk.quads.vertexShader, 0);
+		g_vk.quads.vertexShader = 0;
 	}
-	if (g_vk.quads.fragment_shader) {
-		vkDestroyShaderModule(g_vk.device, g_vk.quads.fragment_shader, 0);
+	if (g_vk.quads.fragmentShader) {
+		vkDestroyShaderModule(g_vk.device, g_vk.quads.fragmentShader, 0);
+		g_vk.quads.fragmentShader = 0;
+	}
+	if (g_vk.descriptorPool) {
+		vkDestroyDescriptorPool(g_vk.device, g_vk.descriptorPool, 0);
+		g_vk.descriptorPool = 0;
 	}
 	if (g_vk.commandPool) {
 		vkDestroyCommandPool(g_vk.device, g_vk.commandPool, 0);
@@ -777,6 +975,10 @@ bail:
 	if (g_vk.sem.acquire) {
 		vkDestroySemaphore(g_vk.device, g_vk.sem.acquire, 0);
 		g_vk.sem.acquire = 0;
+	}
+	if (g_vk.allocator) {
+		vmaDestroyAllocator(g_vk.allocator);
+		g_vk.allocator = 0;
 	}
 	if (g_vk.device) {
 		vkDestroyDevice(g_vk.device, 0);
@@ -815,7 +1017,6 @@ Display_VK::TryVideoMode(const VideoModeParams& _p, bool& bNewDeviceOut)
 #endif
 
 	VkResult rc = VK_SUCCESS;
-	VkSurfaceCapabilitiesKHR surfaceCapabilities = {};
 
 	// Create surface (platform dependent)
 	{
@@ -904,14 +1105,12 @@ Display_VK::BeginFrame() -> bool
 #error todo?
 #endif
 
-	VkResult rc = VK_SUCCESS;
-
-	rc = vkAcquireNextImageKHR(g_vk.device,
-							   g_vk.swapchain.swapchain,
-							   ~0ULL,
-							   g_vk.sem.acquire,
-							   VK_NULL_HANDLE,
-							   &g_vk.frameImageIndex);
+	VkResult rc = vkAcquireNextImageKHR(g_vk.device,
+										g_vk.swapchain.swapchain,
+										~0ULL,
+										g_vk.sem.acquire,
+										VK_NULL_HANDLE,
+										&g_vk.frameImageIndex);
 	DEBUG_ASSERT(rc == VK_SUCCESS);
 
 	if (rc != VK_SUCCESS) {
@@ -954,7 +1153,6 @@ Display_VK::BeginFrame() -> bool
 	vkCmdBindPipeline(g_vk.commandBuffer,
 					  VK_PIPELINE_BIND_POINT_GRAPHICS,
 					  g_vk.swapchain.pipelines[0]);
-	vkCmdDraw(g_vk.commandBuffer, 3, 1, 0, 0);
 
 	return RageDisplay::BeginFrame();
 }
@@ -963,6 +1161,35 @@ void
 Display_VK::EndFrame()
 {
 	VkResult rc = VK_SUCCESS;
+
+	if (g_vk.quads.quads.size() > 0) {
+		DEBUG_ASSERT((g_vk.quads.quads.size() * 6) ==
+					 g_vk.quads.indices.size());
+		memcpy(g_vk.quads.quadsBuffer.mappedMemory,
+			   g_vk.quads.quads.data(),
+			   g_vk.quads.quads.size() * sizeof(QuadsProgram::Quad));
+		memcpy(g_vk.quads.indexBuffer.mappedMemory,
+			   g_vk.quads.indices.data(),
+			   g_vk.quads.indices.size() * sizeof(uint16_t));
+
+		vkCmdBindDescriptorSets(g_vk.commandBuffer,
+								VK_PIPELINE_BIND_POINT_GRAPHICS,
+								g_vk.quads.pipelineLayout,
+								0,
+								1,
+								&g_vk.quads.descriptorSet,
+								0,
+								0);
+		vkCmdBindIndexBuffer(g_vk.commandBuffer,
+							 g_vk.quads.indexBuffer.buffer,
+							 0,
+							 VK_INDEX_TYPE_UINT16);
+		vkCmdDrawIndexed(
+		  g_vk.commandBuffer, uint32_t(g_vk.quads.indices.size()), 1, 0, 0, 0);
+
+		g_vk.quads.quads.clear();
+		g_vk.quads.indices.clear();
+	}
 
 	vkCmdEndRenderPass(g_vk.commandBuffer);
 	vkEndCommandBuffer(g_vk.commandBuffer);
@@ -1116,6 +1343,38 @@ Display_VK::IsZTestEnabled() const -> bool
 void
 Display_VK::PushQuads(RenderQuad q[], size_t numQuads)
 {
+	if ((g_vk.quads.quads.size() + numQuads) * sizeof(QuadsProgram::Quad) >
+		Buffer::Size) {
+		DEBUG_ASSERT(!"Hit max quad limit");
+		// Todo: log
+		return;
+	}
+
+	size_t quadsOffset = g_vk.quads.quads.size();
+	size_t indicesOffset = g_vk.quads.indices.size();
+
+	g_vk.quads.quads.resize(quadsOffset + numQuads);
+	g_vk.quads.indices.resize(indicesOffset + 6 * numQuads);
+
+	ASSERT(g_vk.quads.indices.size() * sizeof(uint16_t) < Buffer::Size);
+
+	for (size_t i = 0; i < numQuads; i++) {
+		g_vk.quads.quads[quadsOffset + i].rect = q[i].rect;
+		g_vk.quads.quads[quadsOffset + i].tex = q[i].texCoords;
+		memcpy(g_vk.quads.quads[quadsOffset + i].colors,
+			   q[i].colors,
+			   sizeof(q[i].colors));
+	}
+
+	uint16_t indices_index = quadsOffset * 4;
+	for (size_t i = 0; i < numQuads * 6; i += 6, indices_index += 4) {
+		g_vk.quads.indices[indicesOffset + i + 0] = indices_index + 0;
+		g_vk.quads.indices[indicesOffset + i + 1] = indices_index + 1;
+		g_vk.quads.indices[indicesOffset + i + 2] = indices_index + 2;
+		g_vk.quads.indices[indicesOffset + i + 3] = indices_index + 2;
+		g_vk.quads.indices[indicesOffset + i + 4] = indices_index + 3;
+		g_vk.quads.indices[indicesOffset + i + 5] = indices_index + 0;
+	}
 }
 
 auto

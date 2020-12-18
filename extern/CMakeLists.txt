@@ -37,7 +37,10 @@ add_subdirectory(discord-rpc)
 ## Header Only
 add_subdirectory(rapidjson)
 add_subdirectory(stb)
+
+## Vulkan
 add_subdirectory(Vulkan-Headers)
+add_subdirectory(VulkanMemoryAllocator)
 add_subdirectory(volk)
 
 ## Remaining Libraries
