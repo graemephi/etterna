@@ -30,6 +30,7 @@ struct RenderQuad
 		q.rect = rect;
 		return q;
 	}
+
 	auto Colors(const RageColor colors[4]) const -> RenderQuad
 	{
 		RenderQuad q = *this;
@@ -39,6 +40,7 @@ struct RenderQuad
 		q.colors[3] = colors[1]; // top right
 		return q;
 	}
+
 	auto Color(RageColor c) const -> RenderQuad
 	{
 		RenderQuad q = *this;
@@ -48,6 +50,7 @@ struct RenderQuad
 		q.colors[3] = c;
 		return q;
 	}
+
 	auto Texture(intptr_t handle, RectF texCoords) const -> RenderQuad
 	{
 		RenderQuad q = *this;
@@ -55,24 +58,28 @@ struct RenderQuad
 		q.texCoords = texCoords;
 		return q;
 	}
+
 	auto TextureMode(TextureMode m) const -> RenderQuad
 	{
 		RenderQuad q = *this;
 		q.textureMode = m;
 		return q;
 	}
+
 	auto TextureWrapping(bool b) const -> RenderQuad
 	{
 		RenderQuad q = *this;
 		q.textureWrapping = b;
 		return q;
 	}
+
 	auto TextureFiltering(bool b) const -> RenderQuad
 	{
 		RenderQuad q = *this;
 		q.textureFiltering = b;
 		return q;
 	}
+
 	auto Translate(RageVector2 v) const -> RenderQuad
 	{
 		RenderQuad q = *this;
@@ -82,6 +89,7 @@ struct RenderQuad
 		q.rect.bottom += v.y;
 		return q;
 	}
+
 	auto Translate(float x, float y) const -> RenderQuad
 	{
 		return Translate(RageVector2(x, y));
