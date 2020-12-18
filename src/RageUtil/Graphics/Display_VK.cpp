@@ -551,6 +551,7 @@ CreatePersistentlyMappedBuffer(Buffer& buffer,
 	VmaAllocationCreateInfo allocCreateInfo = {};
 	allocCreateInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
 	allocCreateInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+	allocCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 
 	VkBufferCreateInfo bufferInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
 	bufferInfo.size = size;
