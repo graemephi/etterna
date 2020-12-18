@@ -1,4 +1,5 @@
 #include "Etterna/Globals/global.h"
+#include "RageUtil/Misc/RageMath.h"
 #include "Display_VK.h"
 
 #ifdef _WIN32
@@ -35,16 +36,16 @@ struct MatrixArray
 {
 	std::vector<RageMatrix> array;
 
-	auto insert(const RageMatrix& matrix) -> uint8_t
+	auto insert(const RageMatrix& matrix) -> uint16_t
 	{
 		for (ptrdiff_t i = array.size() - 1; i >= 0; i--) {
 			if (memcmp(&matrix, &array[i], sizeof(RageMatrix)) == 0) {
-				return uint8_t(i);
+				return uint16_t(i);
 			}
 		}
 
-		uint8_t result = uint8_t(array.size());
-		assert(array.size() < UINT8_MAX);
+		uint16_t result = uint16_t(array.size());
+		assert(array.size() < UINT16_MAX);
 		array.push_back(matrix);
 		return result;
 	}
@@ -73,10 +74,9 @@ struct QuadsProgram
 		RectF rect;
 		RectF tex;
 		RageColor colors[4];
-		uint8_t world;
+		uint16_t world;
 		uint8_t view;
 		uint8_t projection;
-		uint8_t centering;
 	};
 
 	std::vector<Quad> quads;
@@ -137,7 +137,6 @@ static struct VulkanState
 	MatrixArray worldArray;
 	MatrixArray viewArray;
 	MatrixArray projectionArray;
-	MatrixArray centeringArray;
 } g_vk = {};
 
 VkBool32
@@ -1231,23 +1230,17 @@ Display_VK::EndFrame()
 						  VK_PIPELINE_BIND_POINT_GRAPHICS,
 						  g_vk.swapchain.pipelines[0]);
 
-		uint8_t centeringOffset = 0;
-		uint8_t projectionOffset =
-		  uint8_t(centeringOffset + g_vk.centeringArray.size());
+		uint8_t projectionOffset = 0;
 		uint8_t viewOffset =
 		  uint8_t(projectionOffset + g_vk.projectionArray.size());
 		uint8_t worldOffset = uint8_t(viewOffset + g_vk.viewArray.size());
 		for (size_t i = 0; i < g_vk.quads.quads.size(); i++) {
-			// TODO: 256 might be too low
-			ASSERT(g_vk.quads.quads[i].world + worldOffset <= UINT8_MAX);
-			g_vk.quads.quads[i].centering += centeringOffset;
 			g_vk.quads.quads[i].projection += projectionOffset;
 			g_vk.quads.quads[i].view += viewOffset;
 			g_vk.quads.quads[i].world += worldOffset;
 		}
 
-		ASSERT((g_vk.centeringArray.sizeInBytes() +
-				g_vk.projectionArray.sizeInBytes() +
+		ASSERT((g_vk.projectionArray.sizeInBytes() +
 				g_vk.viewArray.sizeInBytes() + g_vk.worldArray.sizeInBytes()) <
 			   g_vk.quads.uniformBuffer.size);
 
@@ -1259,10 +1252,6 @@ Display_VK::EndFrame()
 			   g_vk.quads.indices.data(),
 			   g_vk.quads.indices.size() * sizeof(uint16_t));
 
-		memcpy(((RageMatrix*)g_vk.quads.uniformBuffer.mappedMemory) +
-				 centeringOffset,
-			   g_vk.centeringArray.data(),
-			   g_vk.centeringArray.sizeInBytes());
 		memcpy(((RageMatrix*)g_vk.quads.uniformBuffer.mappedMemory) +
 				 projectionOffset,
 			   g_vk.projectionArray.data(),
@@ -1297,7 +1286,6 @@ Display_VK::EndFrame()
 		g_vk.worldArray.reset();
 		g_vk.viewArray.reset();
 		g_vk.projectionArray.reset();
-		g_vk.centeringArray.reset();
 	}
 
 	vkCmdEndRenderPass(g_vk.commandBuffer);
@@ -1454,18 +1442,29 @@ Display_VK::PushQuads(RenderQuad q[], size_t numQuads)
 {
 	if ((g_vk.quads.quads.size() + numQuads) * sizeof(QuadsProgram::Quad) >
 		g_vk.quads.quadsBuffer.size) {
-		DEBUG_ASSERT(!"Hit max quad limit");
+		DEBUG_ASSERT(!"Hit quad limit");
 		// Todo: log
 		return;
 	}
 
 	// Temporary way to work with RageDisplay Push/PopMatrix stuff
-	uint8_t worldIndex = g_vk.worldArray.insert(*RageDisplay::GetWorldTop());
-	uint8_t viewIndex = g_vk.viewArray.insert(*RageDisplay::GetViewTop());
-	uint8_t projectionIndex =
+	RageMatrix centeredView = {};
+	RageMatrixMultiply(
+	  &centeredView, RageDisplay::GetViewTop(), RageDisplay::GetCentering());
+
+	uint16_t worldIndex = g_vk.worldArray.insert(*RageDisplay::GetWorldTop());
+	uint16_t viewIndex16 = g_vk.viewArray.insert(centeredView);
+	uint16_t projectionIndex16 =
 	  g_vk.projectionArray.insert(*RageDisplay::GetProjectionTop());
-	uint8_t centeringIndex =
-	  g_vk.centeringArray.insert(*RageDisplay::GetCentering());
+
+	if (viewIndex16 > UINT8_MAX || projectionIndex16 > UINT8_MAX) {
+		DEBUG_ASSERT(!"Hit view/projection matrix limit");
+		// Todo: log. There are typically only 1 or 2 of these each by the way
+		return;
+	}
+
+	uint8_t viewIndex = uint8_t(viewIndex16);
+	uint8_t projectionIndex = uint8_t(projectionIndex16);
 
 	size_t quadsOffset = g_vk.quads.quads.size();
 	size_t indicesOffset = g_vk.quads.indices.size();
@@ -1482,7 +1481,6 @@ Display_VK::PushQuads(RenderQuad q[], size_t numQuads)
 		g_vk.quads.quads[quadsOffset + i].world = worldIndex;
 		g_vk.quads.quads[quadsOffset + i].view = viewIndex;
 		g_vk.quads.quads[quadsOffset + i].projection = projectionIndex;
-		g_vk.quads.quads[quadsOffset + i].centering = centeringIndex;
 		memcpy(g_vk.quads.quads[quadsOffset + i].colors,
 			   q[i].colors,
 			   4 * sizeof(RageColor));

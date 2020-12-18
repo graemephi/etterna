@@ -23,10 +23,6 @@ struct Quad {
     Rect rect;
     Rect tex;
     Color colors[4];
-
-    // Using 8 bit types here requires an extension with Vulkan 1.1.
-    // We could 1) enable that, 2) move to 1.2 where it is core, or
-    // 3) just unpack them ourselves. For now, 3
     uint matrixIndices;
 };
 
@@ -51,11 +47,9 @@ void main() {
         case 2: pos = vec2(quad.rect.right, quad.rect.bottom); break;
         case 3: pos = vec2(quad.rect.right, quad.rect.top); break;
     }
-    mat4x4 world = matrices[quad.matrixIndices & 0xff];
-    mat4x4 view = matrices[(quad.matrixIndices >> 8) & 0xff];
-    mat4x4 proj = matrices[(quad.matrixIndices >> 16) & 0xff];
-    // why is this a thing
-    mat4x4 centering = matrices[(quad.matrixIndices >> 24) & 0xff];
-    gl_Position = proj * (centering * (view * (world * vec4(pos, 0.0, 1.0))));
+    mat4x4 world = matrices[quad.matrixIndices & 0xffff];
+    mat4x4 view = matrices[(quad.matrixIndices >> 16) & 0xff];
+    mat4x4 proj = matrices[quad.matrixIndices >> 24];
+    gl_Position = proj * (view * (world * vec4(pos, 0.0, 1.0)));
     vertexColor = color_to_vec(quad.colors[corner]);
 }
