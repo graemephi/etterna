@@ -298,7 +298,7 @@ CreateSwapchain(Swapchain& swapchain, VkSwapchainKHR oldSwapchain = 0)
 		swapchain.format = format.format;
 	}
 
-	// Create swap chainF
+	// Create swap chain
 	{
 		VkCompositeAlphaFlagBitsKHR compositeAlpha =
 		  VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
@@ -314,7 +314,9 @@ CreateSwapchain(Swapchain& swapchain, VkSwapchainKHR oldSwapchain = 0)
 		};
 		swapchainInfo.surface = g_vk.surface;
 		swapchainInfo.minImageCount =
-		  std::min(3u, surfaceCapabilities.minImageCount);
+		  std::clamp(3u,
+					 surfaceCapabilities.minImageCount,
+					 surfaceCapabilities.maxImageCount);
 		swapchainInfo.imageFormat = format.format;
 		swapchainInfo.imageColorSpace = format.colorSpace;
 		swapchainInfo.imageExtent = swapchain.dim;
@@ -327,10 +329,9 @@ CreateSwapchain(Swapchain& swapchain, VkSwapchainKHR oldSwapchain = 0)
 		swapchainInfo.pQueueFamilyIndices = &g_vk.queueFamilyIndex;
 		swapchainInfo.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
 		swapchainInfo.compositeAlpha = compositeAlpha;
-		// TODO: Not guaranteed to be supported. We're latency sensitive and
-		// very fast to render, so we want this, not FIFO (which is always
-		// supported)
-		swapchainInfo.presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
+		// TODO: Set up VK_PRESENT_MODE_MAILBOX_KHR (preferred) and
+		// VK_PRESENT_MODE_FIFO_KHR (fallback) for vsync
+		swapchainInfo.presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
 		swapchainInfo.clipped = VK_TRUE;
 		swapchainInfo.oldSwapchain = oldSwapchain;
 
