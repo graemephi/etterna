@@ -1,5 +1,6 @@
 #include "Etterna/Globals/global.h"
 #include "RageUtil/Misc/RageMath.h"
+#include "RageSurface.h"
 #include "Display_VK.h"
 
 #ifdef _WIN32
@@ -51,20 +52,39 @@ struct MatrixArray
 	}
 
 	void reset() { array.clear(); }
-
 	auto size() -> size_t { return array.size(); }
-
 	auto sizeInBytes() -> size_t { return array.size() * sizeof(RageMatrix); }
-
 	auto data() -> RageMatrix* { return array.data(); }
 };
 
 struct Buffer
 {
-	VkBuffer buffer;
 	VmaAllocation allocation;
+	VkBuffer buffer;
 	size_t size;
 	void* mappedMemory;
+};
+
+struct Texture
+{
+	enum
+	{
+		Wrapping = 0b01,
+		Filtering = 0b10,
+		PossibleSamplerCount = 4,
+		MaxSlots = 64
+	};
+
+	RageSurface* surface;
+	VmaAllocation allocation;
+	VkImage image;
+	VkImageView view;
+	uint32_t width;
+	uint32_t height;
+
+	size_t frameLastUsed;
+	VkSampler lastSamplerUsed;
+	size_t slot;
 };
 
 struct QuadsProgram
@@ -77,6 +97,7 @@ struct QuadsProgram
 		uint16_t world;
 		uint8_t view;
 		uint8_t projection;
+		uint32_t textureIndex;
 	};
 
 	std::vector<Quad> quads;
@@ -86,6 +107,7 @@ struct QuadsProgram
 	VkShaderModule fragmentShader;
 	VkPipelineLayout pipelineLayout;
 	VkDescriptorSet descriptorSet;
+	VkDescriptorSetLayout descriptorSetLayout;
 	Buffer quadsBuffer;
 	Buffer indexBuffer;
 	Buffer uniformBuffer;
@@ -108,6 +130,9 @@ struct Swapchain
 static struct VulkanState
 {
 	VkPhysicalDeviceProperties properties;
+	uint32_t maxBoundTextures;
+
+	bool resolutionChanged;
 
 	VkInstance instance;
 	VkDebugUtilsMessengerEXT debugMessenger;
@@ -124,15 +149,29 @@ static struct VulkanState
 	VkSurfaceKHR surface;
 	Swapchain swapchain;
 
+	Buffer textureStagingBuffer;
+	std::unordered_map<intptr_t, Texture> textures;
+	intptr_t nextTextureHandle;
+
+	VkSampler samplers[Texture::PossibleSamplerCount];
+	std::vector<VkDescriptorImageInfo> descriptorImageInfos;
+
 	struct
 	{
 		VkSemaphore release;
 		VkSemaphore acquire;
 	} sem;
 
-	QuadsProgram quads;
+	struct
+	{
+		size_t count;
+		uint32_t imageIndex;
+		std::vector<intptr_t> usedTextures;
+		intptr_t textureSlots[Texture::MaxSlots];
+		bool hasNewSetOfTextures;
+	} frame;
 
-	uint32_t frameImageIndex;
+	QuadsProgram quads;
 
 	MatrixArray worldArray;
 	MatrixArray viewArray;
@@ -172,6 +211,8 @@ PhysicalDeviceQueueFamilyCanPresent(VkPhysicalDevice device,
 void
 DestroySwapchain(Swapchain& swapchain)
 {
+	vkDeviceWaitIdle(g_vk.device);
+
 	for (size_t i = 0; i < swapchain.pipelines.size(); i++) {
 		if (swapchain.pipelines[i]) {
 			vkDestroyPipeline(g_vk.device, swapchain.pipelines[i], 0);
@@ -257,7 +298,7 @@ CreateSwapchain(Swapchain& swapchain, VkSwapchainKHR oldSwapchain = 0)
 		swapchain.format = format.format;
 	}
 
-	// Create swap chain
+	// Create swap chainF
 	{
 		VkCompositeAlphaFlagBitsKHR compositeAlpha =
 		  VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
@@ -273,7 +314,7 @@ CreateSwapchain(Swapchain& swapchain, VkSwapchainKHR oldSwapchain = 0)
 		};
 		swapchainInfo.surface = g_vk.surface;
 		swapchainInfo.minImageCount =
-		  std::min(2u, surfaceCapabilities.minImageCount);
+		  std::min(3u, surfaceCapabilities.minImageCount);
 		swapchainInfo.imageFormat = format.format;
 		swapchainInfo.imageColorSpace = format.colorSpace;
 		swapchainInfo.imageExtent = swapchain.dim;
@@ -529,6 +570,8 @@ bail:
 void
 RecreateSwapchain(Swapchain& swapchain)
 {
+	vkDeviceWaitIdle(g_vk.device);
+
 	// Create a new swapchain first so the driver can reuse resources, then
 	// destroy the old swapchain.
 	Swapchain newSwapchain{};
@@ -538,7 +581,6 @@ RecreateSwapchain(Swapchain& swapchain)
 		FAIL_M("Display_VK: failed to recreate swapchain");
 	}
 
-	vkDeviceWaitIdle(g_vk.device);
 	DestroySwapchain(swapchain);
 	swapchain = newSwapchain;
 }
@@ -568,6 +610,86 @@ CreatePersistentlyMappedBuffer(Buffer& buffer,
 
 	buffer.size = size;
 	buffer.mappedMemory = allocInfo.pMappedData;
+	return rc;
+}
+
+void
+DestroyTexture(Texture& texture)
+{
+	if (texture.image) {
+		vmaDestroyImage(g_vk.allocator, texture.image, texture.allocation);
+	}
+	if (texture.view) {
+		vkDestroyImageView(g_vk.device, texture.view, 0);
+	}
+	texture = {};
+}
+
+auto
+CreateTexture(Texture& texture, int32_t width, int32_t height) -> VkResult
+{
+	uint32_t w = uint32_t(power_of_two(width));
+	uint32_t h = uint32_t(power_of_two(height));
+
+	VkResult rc = VK_SUCCESS;
+
+	{
+		VmaAllocationCreateInfo allocCreateInfo = {};
+		allocCreateInfo.flags = VMA_ALLOCATION_CREATE_CAN_MAKE_OTHER_LOST_BIT |
+								VMA_ALLOCATION_CREATE_CAN_BECOME_LOST_BIT;
+		allocCreateInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+		VkImageCreateInfo imageInfo = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+		imageInfo.imageType = VK_IMAGE_TYPE_2D;
+		// Maybe actually VK_FORMAT_R8G8B8A8_UNORM for SM
+		imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+		imageInfo.extent = { w, h, 1 };
+		imageInfo.mipLevels = 1;
+		imageInfo.arrayLayers = 1;
+		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+		imageInfo.usage =
+		  VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+
+		VmaAllocationInfo allocInfo = {};
+		rc = vmaCreateImage(g_vk.allocator,
+							&imageInfo,
+							&allocCreateInfo,
+							&texture.image,
+							&texture.allocation,
+							&allocInfo);
+		DEBUG_ASSERT(texture.image);
+
+		if (rc != VK_SUCCESS) {
+			goto bail;
+		}
+	}
+
+	{
+		VkImageViewCreateInfo viewInfo = {
+			VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO
+		};
+		viewInfo.image = texture.image;
+		viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+		viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		viewInfo.subresourceRange.levelCount = 1;
+		viewInfo.subresourceRange.layerCount = 1;
+		rc = vkCreateImageView(g_vk.device, &viewInfo, 0, &texture.view);
+		DEBUG_ASSERT(texture.view);
+
+		if (rc != VK_SUCCESS) {
+			goto bail;
+		}
+	}
+
+	texture.width = w;
+	texture.height = h;
+	texture.frameLastUsed = -1;
+	texture.slot = 0;
+	return rc;
+
+bail:
+	DestroyTexture(texture);
 	return rc;
 }
 
@@ -604,7 +726,7 @@ CreateQuadsProgram(QuadsProgram& quads) -> VkResult
 	}
 
 	// Pipeline layout
-	VkDescriptorSetLayoutBinding setLayoutBindings[2] = {};
+	VkDescriptorSetLayoutBinding setLayoutBindings[3] = {};
 	setLayoutBindings[0].binding = 0;
 	setLayoutBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 	setLayoutBindings[0].descriptorCount = 1;
@@ -613,16 +735,20 @@ CreateQuadsProgram(QuadsProgram& quads) -> VkResult
 	setLayoutBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 	setLayoutBindings[1].descriptorCount = 1;
 	setLayoutBindings[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+	setLayoutBindings[2].binding = 2;
+	setLayoutBindings[2].descriptorType =
+	  VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	setLayoutBindings[2].descriptorCount = g_vk.maxBoundTextures;
+	setLayoutBindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
 	VkDescriptorSetLayoutCreateInfo setLayoutInfo = {
 		VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO
 	};
-	setLayoutInfo.bindingCount = 2;
+	setLayoutInfo.bindingCount = 3;
 	setLayoutInfo.pBindings = setLayoutBindings;
 
-	VkDescriptorSetLayout setLayout = 0;
-	rc =
-	  vkCreateDescriptorSetLayout(g_vk.device, &setLayoutInfo, 0, &setLayout);
+	rc = vkCreateDescriptorSetLayout(
+	  g_vk.device, &setLayoutInfo, 0, &quads.descriptorSetLayout);
 
 	if (rc != VK_SUCCESS) {
 		return rc;
@@ -633,7 +759,7 @@ CreateQuadsProgram(QuadsProgram& quads) -> VkResult
 	};
 	setAllocateInfo.descriptorPool = g_vk.descriptorPool;
 	setAllocateInfo.descriptorSetCount = 1;
-	setAllocateInfo.pSetLayouts = &setLayout;
+	setAllocateInfo.pSetLayouts = &quads.descriptorSetLayout;
 
 	rc = vkAllocateDescriptorSets(
 	  g_vk.device, &setAllocateInfo, &quads.descriptorSet);
@@ -645,7 +771,7 @@ CreateQuadsProgram(QuadsProgram& quads) -> VkResult
 	VkPipelineLayoutCreateInfo layoutInfo = {
 		VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO
 	};
-	layoutInfo.pSetLayouts = &setLayout;
+	layoutInfo.pSetLayouts = &quads.descriptorSetLayout;
 	layoutInfo.setLayoutCount = 1;
 	rc = vkCreatePipelineLayout(
 	  g_vk.device, &layoutInfo, 0, &quads.pipelineLayout);
@@ -702,8 +828,6 @@ CreateQuadsProgram(QuadsProgram& quads) -> VkResult
 
 	vkUpdateDescriptorSets(g_vk.device, 2, writeDescriptorSets, 0, 0);
 
-	vkDestroyDescriptorSetLayout(g_vk.device, setLayout, 0);
-
 	return rc;
 }
 
@@ -723,12 +847,6 @@ Display_VK::Init(const VideoModeParams& p, bool bAllowUnacceleratedRenderer)
 	std::vector<char const*> extensions;
 	std::vector<char const*> deviceExtensions;
 
-	VkResult rc = volkInitialize();
-
-	if (rc != VK_SUCCESS) {
-		goto bail;
-	}
-
 #ifdef DEBUG
 	// Although we can compile without the SDK, this validation layer requires
 	// it, and Vulkan will fail to initialize without it.
@@ -736,6 +854,16 @@ Display_VK::Init(const VideoModeParams& p, bool bAllowUnacceleratedRenderer)
 	// extensions
 	layers.push_back("VK_LAYER_KHRONOS_validation");
 	extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+
+	VkValidationFeatureEnableEXT enable[] = {
+		VK_VALIDATION_FEATURE_ENABLE_BEST_PRACTICES_EXT
+	};
+	VkValidationFeaturesEXT features = {
+		VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT
+	};
+	features.sType = VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT;
+	features.enabledValidationFeatureCount = 1;
+	features.pEnabledValidationFeatures = enable;
 #endif
 
 	extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
@@ -744,6 +872,12 @@ Display_VK::Init(const VideoModeParams& p, bool bAllowUnacceleratedRenderer)
 #else
 #error todo
 #endif
+
+	VkResult rc = volkInitialize();
+
+	if (rc != VK_SUCCESS) {
+		goto bail;
+	}
 
 	// Create instace
 	{
@@ -755,6 +889,9 @@ Display_VK::Init(const VideoModeParams& p, bool bAllowUnacceleratedRenderer)
 		VkInstanceCreateInfo instanceInfo = {
 			VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO
 		};
+#ifdef DEBUG
+		instanceInfo.pNext = &features;
+#endif
 
 		if (layers.size() > 0) {
 			instanceInfo.ppEnabledLayerNames = layers.data();
@@ -892,6 +1029,10 @@ Display_VK::Init(const VideoModeParams& p, bool bAllowUnacceleratedRenderer)
 
 		vkGetDeviceQueue(g_vk.device, g_vk.queueFamilyIndex, 0, &g_vk.queue);
 		DEBUG_ASSERT(g_vk.queue);
+
+		g_vk.maxBoundTextures =
+		  std::min(uint32_t(Texture::MaxSlots),
+				   g_vk.properties.limits.maxPerStageDescriptorSampledImages);
 	}
 
 	// Initialize VulkanMemoryAllocator
@@ -959,11 +1100,14 @@ Display_VK::Init(const VideoModeParams& p, bool bAllowUnacceleratedRenderer)
 		}
 	}
 
-	// Create descriptor pool
+	// Create descriptor pool. This is highly specific to the needs of
+	// QuadsProgram
 	{
-		VkDescriptorPoolSize poolSizes[1] = {};
+		VkDescriptorPoolSize poolSizes[2] = {};
 		poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 		poolSizes[0].descriptorCount = 1;
+		poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		poolSizes[1].descriptorCount = g_vk.maxBoundTextures;
 
 		VkDescriptorPoolCreateInfo descriptorPoolInfo = {
 			VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO
@@ -980,10 +1124,61 @@ Display_VK::Init(const VideoModeParams& p, bool bAllowUnacceleratedRenderer)
 		}
 	}
 
+	// Create staging buffer
+	{
+		uint32_t dim = GetMaxTextureSize();
+		rc = CreatePersistentlyMappedBuffer(g_vk.textureStagingBuffer,
+											dim * dim * sizeof(uint32_t),
+											VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+
+		if (rc != VK_SUCCESS) {
+			goto bail;
+		}
+	}
+
+	// Create samplers. Just create all combinations up front as SM only
+	// supports wrapping and filtering toggles.
+	{
+		VkSamplerCreateInfo samplerInfo = {
+			VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO
+		};
+
+		for (size_t i = 0; i < Texture::PossibleSamplerCount; i++) {
+			samplerInfo.magFilter =
+			  (i & Texture::Filtering) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+			samplerInfo.minFilter =
+			  (i & Texture::Filtering) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+			samplerInfo.addressModeU =
+			  (i & Texture::Wrapping) ? VK_SAMPLER_ADDRESS_MODE_REPEAT
+									  : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+			samplerInfo.addressModeV =
+			  (i & Texture::Wrapping) ? VK_SAMPLER_ADDRESS_MODE_REPEAT
+									  : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+			rc =
+			  vkCreateSampler(g_vk.device, &samplerInfo, 0, &g_vk.samplers[i]);
+			DEBUG_ASSERT(g_vk.samplers[i]);
+
+			if (rc != VK_SUCCESS) {
+				goto bail;
+			}
+		}
+	}
+
 	rc = CreateQuadsProgram(g_vk.quads);
 
 	if (rc != VK_SUCCESS) {
 		goto bail;
+	}
+
+	// Create empty texture
+	{
+		RageSurface* img = CreateSurface(
+		  1, 1, 32, 0xff000000, 0x00ff0000, 0x0000ff00, 0x000000ff);
+		CreateTexture(RagePixelFormat_RGBA8, img, false);
+
+		memset(g_vk.frame.textureSlots, -1, sizeof(g_vk.frame.textureSlots));
+		// Reserve slot 0 for the empty texture
+		g_vk.frame.textureSlots[0] = 0;
 	}
 
 	// Rest of the initialization happens in TryVideoMode
@@ -994,6 +1189,12 @@ Display_VK::Init(const VideoModeParams& p, bool bAllowUnacceleratedRenderer)
 bail:
 	// "All child objects created using instance must have been destroyed prior
 	// to destroying instance" whats the worse that could happen
+	for (size_t i = 0; i < Texture::PossibleSamplerCount; i++) {
+		if (g_vk.samplers[i]) {
+			vkDestroySampler(g_vk.device, g_vk.samplers[i], 0);
+			g_vk.samplers[i] = 0;
+		}
+	}
 	if (g_vk.quads.uniformBuffer.buffer) {
 		vmaDestroyBuffer(g_vk.allocator,
 						 g_vk.quads.uniformBuffer.buffer,
@@ -1137,13 +1338,14 @@ Display_VK::GetActualVideoModeParams() const -> const ActualVideoModeParams*
 void
 Display_VK::ResolutionChanged()
 {
-	RecreateSwapchain(g_vk.swapchain);
+	g_vk.resolutionChanged = true;
+	RageDisplay::ResolutionChanged();
 }
 
 auto
 Display_VK::GetMaxTextureSize() const -> int
 {
-	return g_vk.properties.limits.maxImageDimension2D;
+	return std::min(4096u, g_vk.properties.limits.maxImageDimension2D);
 }
 
 auto
@@ -1151,12 +1353,162 @@ Display_VK::CreateTexture(RagePixelFormat pixfmt,
 						  RageSurface* img,
 						  bool bGenerateMipMaps) -> intptr_t
 {
-	return 1;
+	ASSERT(pixfmt == RagePixelFormat_RGBA8);
+	Texture tex = {};
+	// Yes, we can take a hold of this pointer for the lifetime of the texture.
+	// Yes, this should be a shared_ptr or handle instead.
+	tex.surface = img;
+	VkResult rc = ::CreateTexture(tex, img->w, img->h);
+	// Other backends die here, too.
+	ASSERT(rc == VK_SUCCESS);
+	ptrdiff_t handle = g_vk.nextTextureHandle++;
+	g_vk.textures.insert({ handle, tex });
+	UpdateTexture(handle, img, 0, 0, img->w, img->h);
+	return handle;
 }
 
 void
-Display_VK::DeleteTexture(intptr_t iTexHandle)
+Display_VK::UpdateTexture(intptr_t texHandle,
+						  RageSurface* img,
+						  int xoffset,
+						  int yoffset,
+						  int width,
+						  int height)
 {
+	// Only support updating the entire texture.
+	ASSERT(xoffset == 0);
+	ASSERT(yoffset == 0);
+	ASSERT(img->w == width);
+	ASSERT(img->pitch == width * sizeof(uint32_t));
+	ASSERT(img->h == height);
+
+	VkCommandBufferAllocateInfo cmdBufferInfo = {
+		VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO
+	};
+	cmdBufferInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	cmdBufferInfo.commandPool = g_vk.commandPool;
+	cmdBufferInfo.commandBufferCount = 1;
+
+	VkCommandBuffer copyCommand = 0;
+	vkAllocateCommandBuffers(g_vk.device, &cmdBufferInfo, &copyCommand);
+
+	VkCommandBufferBeginInfo beginInfo = {
+		VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
+	};
+	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	vkBeginCommandBuffer(copyCommand, &beginInfo);
+
+	// TODO: Crashes if texHandle is invalid. Log instead
+	Texture& tex = g_vk.textures.at(texHandle);
+
+	memcpy(g_vk.textureStagingBuffer.mappedMemory,
+		   img->pixels,
+		   img->w * img->h * sizeof(uint32_t));
+
+	// At this point, the texture is on the device (memcpy above), but in the
+	// wrong place and wrong layout (literally how pixels are arranged in
+	// memory). Getting it from the textureStagingBuffer VkBuffer to the
+	// tex.image VkImage is a 3 step process:
+
+	// VkImage old layout -> transfer layout
+	VkImageMemoryBarrier barrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+	barrier.srcAccessMask = 0;
+	barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.image = tex.image;
+	barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	barrier.subresourceRange.baseMipLevel = 0;
+	barrier.subresourceRange.levelCount = 1;
+	barrier.subresourceRange.layerCount = 1;
+	vkCmdPipelineBarrier(copyCommand,
+						 VK_PIPELINE_STAGE_HOST_BIT,
+						 VK_PIPELINE_STAGE_TRANSFER_BIT,
+						 0,
+						 0,
+						 0,
+						 0,
+						 0,
+						 1,
+						 &barrier);
+
+	// Copy VkBuffer -> VkImage
+	VkBufferImageCopy imageCopy = {};
+	imageCopy.imageExtent = { tex.width, tex.height, 1 };
+	imageCopy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	imageCopy.imageSubresource.mipLevel = 0;
+	imageCopy.imageSubresource.baseArrayLayer = 0;
+	imageCopy.imageSubresource.layerCount = 1;
+	// TODO: Expect this to fail when textures are reuploaded on demand
+	vkCmdCopyBufferToImage(copyCommand,
+						   g_vk.textureStagingBuffer.buffer,
+						   tex.image,
+						   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+						   1,
+						   &imageCopy);
+
+	// VkImage transfer layout -> shader readonly layout
+	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	vkCmdPipelineBarrier(copyCommand,
+						 VK_PIPELINE_STAGE_TRANSFER_BIT,
+						 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+						 0,
+						 0,
+						 0,
+						 0,
+						 0,
+						 1,
+						 &barrier);
+
+	vkEndCommandBuffer(copyCommand);
+
+	VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+	submitInfo.commandBufferCount = 1;
+	submitInfo.pCommandBuffers = &copyCommand;
+
+	vkQueueSubmit(g_vk.queue, 1, &submitInfo, VK_NULL_HANDLE);
+
+	// We just use the one staging buffer, so we can't reuse that memory until
+	// transfer is complete. We also can't free the command buffer until then.
+	// This is probably unecessary serialization
+	vkQueueWaitIdle(g_vk.queue);
+
+	vkFreeCommandBuffers(g_vk.device, g_vk.commandPool, 1, &copyCommand);
+}
+
+void
+Display_VK::DeleteTexture(intptr_t texHandle)
+{
+	Texture& tex = g_vk.textures.at(texHandle);
+	if (g_vk.frame.textureSlots[tex.slot] == texHandle) {
+		g_vk.frame.textureSlots[tex.slot] = -1;
+	}
+	vkQueueWaitIdle(g_vk.queue);
+	DestroyTexture(tex);
+	g_vk.textures.erase(texHandle);
+	g_vk.frame.hasNewSetOfTextures = true;
+}
+
+auto
+Display_VK::GetPixelFormatDesc(RagePixelFormat pixfmt) const
+  -> const RagePixelFormatDesc*
+{
+	ASSERT(pixfmt == RagePixelFormat_RGBA8);
+	static auto desc =
+	  RagePixelFormatDesc{ 32,
+						   { 0xFF000000, 0x00FF0000, 0x0000FF00, 0x000000FF } };
+	return &desc;
+}
+
+auto
+Display_VK::SupportsTextureFormat(RagePixelFormat pixfmt, bool realtime) -> bool
+{
+	return pixfmt == RagePixelFormat_RGBA8;
 }
 
 auto
@@ -1169,23 +1521,37 @@ Display_VK::BeginFrame() -> bool
 #error todo?
 #endif
 
+	if (g_vk.resolutionChanged) {
+		RecreateSwapchain(g_vk.swapchain);
+		g_vk.resolutionChanged = false;
+	}
+
+	return RageDisplay::BeginFrame();
+}
+
+void
+Display_VK::EndFrame()
+{
+	// Wait until the last frame is done before talking to the driver again.
+	vkQueueWaitIdle(g_vk.queue);
+
 	VkResult rc = vkAcquireNextImageKHR(g_vk.device,
 										g_vk.swapchain.swapchain,
 										~0ULL,
 										g_vk.sem.acquire,
 										VK_NULL_HANDLE,
-										&g_vk.frameImageIndex);
+										&g_vk.frame.imageIndex);
 	DEBUG_ASSERT(rc == VK_SUCCESS);
 
 	if (rc != VK_SUCCESS) {
-		return false;
+		return;
 	}
 
 	rc = vkResetCommandPool(g_vk.device, g_vk.commandPool, 0);
 	DEBUG_ASSERT(rc == VK_SUCCESS);
 
 	if (rc != VK_SUCCESS) {
-		return false;
+		return;
 	}
 
 	VkCommandBufferBeginInfo cmdBeginInfo = {
@@ -1196,10 +1562,10 @@ Display_VK::BeginFrame() -> bool
 	DEBUG_ASSERT(rc == VK_SUCCESS);
 
 	if (rc != VK_SUCCESS) {
-		return false;
+		return;
 	}
 
-	VkClearColorValue color = { 1.0f, 0.0f, 1.0f, 1.0f };
+	VkClearColorValue color = { 0.0f, 0.0f, 0.0f, 1.0f };
 	VkClearValue clearValue = { color };
 
 	VkRenderPassBeginInfo passBeginInfo = {
@@ -1207,7 +1573,7 @@ Display_VK::BeginFrame() -> bool
 	};
 	passBeginInfo.renderPass = g_vk.swapchain.renderPass;
 	passBeginInfo.framebuffer =
-	  g_vk.swapchain.framebuffers[g_vk.frameImageIndex];
+	  g_vk.swapchain.framebuffers[g_vk.frame.imageIndex];
 	passBeginInfo.renderArea.extent = g_vk.swapchain.dim;
 	passBeginInfo.clearValueCount = 1;
 	passBeginInfo.pClearValues = &clearValue;
@@ -1215,15 +1581,40 @@ Display_VK::BeginFrame() -> bool
 	vkCmdBeginRenderPass(
 	  g_vk.commandBuffer, &passBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-	return RageDisplay::BeginFrame();
-}
-
-void
-Display_VK::EndFrame()
-{
-	VkResult rc = VK_SUCCESS;
+	g_vk.frame.count++;
 
 	if (g_vk.quads.quads.size() > 0) {
+		if (g_vk.frame.hasNewSetOfTextures) {
+			g_vk.descriptorImageInfos.resize(g_vk.maxBoundTextures);
+			VkImageView nullView = g_vk.textures.at(0).view;
+			for (size_t i = 0; i < g_vk.maxBoundTextures; i++) {
+				g_vk.descriptorImageInfos[i].sampler = g_vk.samplers[0];
+				g_vk.descriptorImageInfos[i].imageView = nullView;
+				g_vk.descriptorImageInfos[i].imageLayout =
+				  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			}
+			for (size_t i = 0; i < g_vk.frame.usedTextures.size(); i++) {
+				Texture& tex = g_vk.textures.at(g_vk.frame.usedTextures[i]);
+				g_vk.descriptorImageInfos[tex.slot].sampler =
+				  tex.lastSamplerUsed;
+				g_vk.descriptorImageInfos[tex.slot].imageView = tex.view;
+			}
+
+			VkWriteDescriptorSet writeDescriptor = {
+				VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET
+			};
+			writeDescriptor.dstSet = g_vk.quads.descriptorSet;
+			writeDescriptor.dstBinding = 2;
+			writeDescriptor.descriptorCount = g_vk.maxBoundTextures;
+			writeDescriptor.descriptorType =
+			  VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			writeDescriptor.pImageInfo = g_vk.descriptorImageInfos.data();
+
+			vkUpdateDescriptorSets(g_vk.device, 1, &writeDescriptor, 0, 0);
+
+			g_vk.frame.hasNewSetOfTextures = true;
+		}
+
 		DEBUG_ASSERT((g_vk.quads.quads.size() * 6) ==
 					 g_vk.quads.indices.size());
 
@@ -1316,7 +1707,7 @@ Display_VK::EndFrame()
 		presentInfo.pWaitSemaphores = &g_vk.sem.release;
 		presentInfo.swapchainCount = 1;
 		presentInfo.pSwapchains = &g_vk.swapchain.swapchain;
-		presentInfo.pImageIndices = &g_vk.frameImageIndex;
+		presentInfo.pImageIndices = &g_vk.frame.imageIndex;
 
 		// Can use RageDisplay's frame pacing stuff
 		// TODO: find out if Vulkan has better stats for this stuff
@@ -1330,13 +1721,13 @@ Display_VK::EndFrame()
 			goto bail;
 		}
 
-		vkQueueWaitIdle(g_vk.queue);
 		const auto afterPresent = std::chrono::steady_clock::now();
 		SetPresentTime(afterPresent - beforePresent);
 		FrameLimitAfterVsync(GetActualVideoModeParams()->rate);
 	}
 
 bail:
+	g_vk.frame.usedTextures.clear();
 	return RageDisplay::EndFrame();
 }
 
@@ -1458,9 +1849,13 @@ Display_VK::PushQuads(RenderQuad q[], size_t numQuads)
 	uint16_t projectionIndex16 =
 	  g_vk.projectionArray.insert(*RageDisplay::GetProjectionTop());
 
-	if (viewIndex16 > UINT8_MAX || projectionIndex16 > UINT8_MAX) {
-		DEBUG_ASSERT(!"Hit view/projection matrix limit");
-		// Todo: log. There are typically only 1 or 2 of these each by the way
+	// We do this bit on the CPU
+	const RageMatrix* textureTranslate = RageDisplay::GetTextureTop();
+
+	if (viewIndex16 > UINT8_MAX || projectionIndex16 > UINT8_MAX ||
+		(viewIndex16 + projectionIndex16 + worldIndex) > 1024) {
+		DEBUG_ASSERT(!"Hit matrix limit");
+		// Todo: log
 		return;
 	}
 
@@ -1476,12 +1871,60 @@ Display_VK::PushQuads(RenderQuad q[], size_t numQuads)
 	ASSERT(g_vk.quads.indices.size() * sizeof(uint16_t) <
 		   g_vk.quads.quadsBuffer.size);
 
+	// Todo: no crash
+	intptr_t handle = q[0].texture;
+	Texture& tex = g_vk.textures.at(handle);
+	// TODO vmaTouchAllocation(g_vk.allocator, tex.allocation);
+	// and recover on false
+	if (tex.frameLastUsed != g_vk.frame.count) {
+		// Broken if the same texture is used w/ different options in the same
+		// frame but seems unlikely that ever happens
+		size_t sampler =
+		  ((q[0].textureFiltering & 1) << 1) + (q[0].textureWrapping & 1);
+
+		if (handle != g_vk.frame.textureSlots[tex.slot]) {
+			// The texture doesn't have an assigned slot
+			bool ok = false;
+			for (size_t i = 1; i < g_vk.maxBoundTextures; i++) {
+				if (g_vk.frame.textureSlots[i] == -1) {
+					tex.slot = i;
+					g_vk.frame.textureSlots[i] = handle;
+					ok = true;
+					break;
+				}
+			}
+			if (ok == false) {
+				// We have more textures than we can draw in one draw call and
+				// need to submit what we have to continue. Ideally, this never
+				// happens
+				FAIL_M("todo");
+			}
+			g_vk.frame.hasNewSetOfTextures = true;
+		}
+
+		g_vk.frame.usedTextures.push_back(handle);
+
+		tex.frameLastUsed = g_vk.frame.count;
+		tex.lastSamplerUsed = g_vk.samplers[sampler];
+	}
+
+	size_t slot = tex.slot;
+
+	float translateX = textureTranslate->m[3][0];
+	float translateY = textureTranslate->m[3][1];
+
 	for (size_t i = 0; i < numQuads; i++) {
 		g_vk.quads.quads[quadsOffset + i].rect = q[i].rect;
-		g_vk.quads.quads[quadsOffset + i].tex = q[i].texCoords;
+		g_vk.quads.quads[quadsOffset + i].tex = {
+			q[i].texCoords.left + translateX,
+			q[i].texCoords.top + translateY,
+			q[i].texCoords.right + translateX,
+			q[i].texCoords.bottom + translateY
+		};
 		g_vk.quads.quads[quadsOffset + i].world = worldIndex;
 		g_vk.quads.quads[quadsOffset + i].view = viewIndex;
 		g_vk.quads.quads[quadsOffset + i].projection = projectionIndex;
+		g_vk.quads.quads[quadsOffset + i].textureIndex = slot;
 		memcpy(g_vk.quads.quads[quadsOffset + i].colors,
 			   q[i].colors,
 			   4 * sizeof(RageColor));
@@ -1513,17 +1956,6 @@ Display_VK::CreateScreenshot() -> RageSurface*
 ///////////////////////////////////////////////////////////////////////////////
 // Needs to be supported for movie bgs
 
-void
-Display_VK::UpdateTexture(intptr_t uTexHandle,
-						  RageSurface* img,
-						  int xoffset,
-						  int yoffset,
-						  int width,
-						  int height)
-{
-	FAIL_M("Not implemented");
-}
-
 auto
 Display_VK::CreateRenderTarget(const RenderTargetParam& param,
 							   int& iTextureWidthOut,
@@ -1543,29 +1975,6 @@ void
 Display_VK::SetRenderTarget(intptr_t uTexHandle, bool bPreserveTexture)
 {
 	FAIL_M("Not implemented");
-}
-
-auto
-Display_VK::GetPixelFormatDesc(RagePixelFormat pf) const
-  -> const RagePixelFormatDesc*
-{
-	FAIL_M("Not implemented");
-	return 0;
-}
-
-auto
-Display_VK::SupportsTextureFormat(RagePixelFormat pixfmt, bool realtime) -> bool
-{
-	RagePixelFormat whateverTheHardwareLikes = RagePixelFormat_Invalid;
-	switch (g_vk.swapchain.format) {
-		case VK_FORMAT_R8G8B8A8_UNORM: {
-			whateverTheHardwareLikes = RagePixelFormat_RGBA8;
-		} break;
-		case VK_FORMAT_B8G8R8A8_UNORM: {
-			whateverTheHardwareLikes = RagePixelFormat_BGRA8;
-		} break;
-	}
-	return pixfmt == whateverTheHardwareLikes;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

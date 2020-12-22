@@ -335,7 +335,9 @@ BitmapText::BuildChars()
 				.Rect(RectF(iX, iY, iX + g.m_fWidth, iY + g.m_fHeight))
 				.Translate(g.m_fHshift, g.m_pPage->m_fVshift)
 				.Texture(0, g.m_TexRect)
-				.TextureMode(TextureMode_Modulate);
+				.TextureMode(TextureMode_Modulate)
+				.TextureFiltering(m_bTextureFiltering)
+				.TextureWrapping(m_bTextureWrapping);
 
 			// Advance the cursor early for RTL(?)
 			if (m_pFont->IsRightToLeft())

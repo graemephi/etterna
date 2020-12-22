@@ -629,8 +629,7 @@ NoteDisplay::DrawHoldsInRange(
 									: field_args.fail_fade);
 
 		const auto note_upcoming =
-		  NoteRowToBeat(start_row) >
-		  GAMESTATE->m_Position.m_fSongBeat;
+		  NoteRowToBeat(start_row) > GAMESTATE->m_Position.m_fSongBeat;
 		any_upcoming |= note_upcoming;
 	}
 	return any_upcoming;
@@ -708,8 +707,8 @@ NoteDisplay::DrawTapsInRange(
 				in_selection_range ? field_args.selection_glow
 								   : field_args.fail_fade);
 
-		any_upcoming |= NoteRowToBeat(tap_row) >
-						GAMESTATE->m_Position.m_fSongBeat;
+		any_upcoming |=
+		  NoteRowToBeat(tap_row) > GAMESTATE->m_Position.m_fSongBeat;
 
 		if (!PREFSMAN->m_FastNoteRendering) {
 			DISPLAY->ClearZBuffer();
@@ -972,17 +971,29 @@ NoteDisplay::DrawHoldPart(vector<Sprite*>& vpSpr,
 	bool no_funny_business = true;
 	if (no_funny_business) {
 		const auto fYOffsetStart = ArrowEffects::GetYOffsetFromYPos(
-			column_args.column, y_start_pos, m_fYReverseOffsetPixels);
+		  column_args.column, y_start_pos, m_fYReverseOffsetPixels);
 		const auto fYOffsetEnd = ArrowEffects::GetYOffsetFromYPos(
-			column_args.column, y_end_pos, m_fYReverseOffsetPixels);
+		  column_args.column, y_end_pos, m_fYReverseOffsetPixels);
 		RageVector3 start = {};
-		ArrowEffects::GetXYZPos(m_pPlayerState, column_args.column, fYOffsetStart, m_fYReverseOffsetPixels, start);
+		ArrowEffects::GetXYZPos(m_pPlayerState,
+								column_args.column,
+								fYOffsetStart,
+								m_fYReverseOffsetPixels,
+								start);
 		RageVector3 end = {};
-		ArrowEffects::GetXYZPos(m_pPlayerState, column_args.column, fYOffsetEnd, m_fYReverseOffsetPixels, end);
+		ArrowEffects::GetXYZPos(m_pPlayerState,
+								column_args.column,
+								fYOffsetEnd,
+								m_fYReverseOffsetPixels,
+								end);
 
-		float width = fFrameWidth * ArrowEffects::GetFrameWidthScale(
+		float width =
+		  fFrameWidth *
+		  ArrowEffects::GetFrameWidthScale(
 			m_pPlayerState, fYOffsetStart, part_args.overlapped_time);
-		float endWidth = fFrameWidth * ArrowEffects::GetFrameWidthScale(
+		float endWidth =
+		  fFrameWidth *
+		  ArrowEffects::GetFrameWidthScale(
 			m_pPlayerState, fYOffsetEnd, part_args.overlapped_time);
 
 		DEBUG_ASSERT(width == endWidth);
@@ -995,36 +1006,43 @@ NoteDisplay::DrawHoldPart(vector<Sprite*>& vpSpr,
 			auto fTexCoordTop = rect.top + add_to_tex_coord;
 
 			const auto fAlpha =
-				ArrowGetAlphaOrGlow(glow,
-									m_pPlayerState,
-									column_args.column,
-									(fYOffsetEnd + fYOffsetStart) * 0.5f,
-									part_args.percent_fade_to_fail,
-									m_fYReverseOffsetPixels,
-									field_args.draw_pixels_before_targets,
-									field_args.fade_before_targets);
+			  ArrowGetAlphaOrGlow(glow,
+								  m_pPlayerState,
+								  column_args.column,
+								  (fYOffsetEnd + fYOffsetStart) * 0.5f,
+								  part_args.percent_fade_to_fail,
+								  m_fYReverseOffsetPixels,
+								  field_args.draw_pixels_before_targets,
+								  field_args.fade_before_targets);
 			const auto color = RageColor(column_args.diffuse.r * color_scale,
-										column_args.diffuse.g * color_scale,
-										column_args.diffuse.b * color_scale,
-										column_args.diffuse.a * fAlpha);
+										 column_args.diffuse.g * color_scale,
+										 column_args.diffuse.b * color_scale,
+										 column_args.diffuse.a * fAlpha);
 
 			if (fAlpha > 0) {
 				const auto fDistFromTop = (y_end_pos - y_start_pos);
-				auto fTexCoordTop =
-					SCALE(fDistFromTop, 0, unzoomed_frame_height, rect.top, rect.bottom);
+				auto fTexCoordTop = SCALE(fDistFromTop,
+										  0,
+										  unzoomed_frame_height,
+										  rect.top,
+										  rect.bottom);
 				auto fTexCoordBottom = rect.top;
 				fTexCoordTop += add_to_tex_coord;
 				fTexCoordBottom += add_to_tex_coord;
 
-				// start and end can have very different values for z, which this
-				// quad discards. This doesnt seem to make a difference even with
-				// mods that affect perspective
-				RenderQuad quad = RenderQuad(width, end.y - start.y)
+				// start and end can have very different values for z, which
+				// this quad discards. This doesnt seem to make a difference
+				// even with mods that affect perspective
+				RenderQuad quad =
+				  RenderQuad(width, end.y - start.y)
 					.Translate(start.x, start.y + (end.y - start.y) * 0.5)
 					.Color(color)
-					.Texture(vpSpr[0]->GetTexture()->GetTexHandle(),
-						RectF(rect.left, fTexCoordBottom, rect.right, fTexCoordTop))
-					.TextureWrapping(part_args.wrapping);
+					.Texture(
+					  vpSpr[0]->GetTexture()->GetTexHandle(),
+					  RectF(
+						rect.left, fTexCoordBottom, rect.right, fTexCoordTop))
+					.TextureWrapping(part_args.wrapping)
+					.TextureFiltering(true);
 
 				DISPLAY->PushQuad(quad);
 			}
