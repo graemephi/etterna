@@ -115,6 +115,11 @@ struct QuadsProgram
 
 struct Swapchain
 {
+	enum
+	{
+		NotReady = 0x12345689
+	};
+
 	VkFormat format;
 	VkExtent2D dim;
 
@@ -132,7 +137,8 @@ static struct VulkanState
 	VkPhysicalDeviceProperties properties;
 	uint32_t maxBoundTextures;
 
-	bool resolutionChanged;
+	bool swapchainInvalid;
+	bool borderlessWindow;
 
 	VkInstance instance;
 	VkDebugUtilsMessengerEXT debugMessenger;
@@ -270,6 +276,11 @@ CreateSwapchain(Swapchain& swapchain, VkSwapchainKHR oldSwapchain = 0)
 	const uint32_t& width = swapchain.dim.width;
 	const uint32_t& height = swapchain.dim.height;
 
+	if (width == 0 && height == 0) {
+		rc = VkResult(Swapchain::NotReady);
+		goto bail;
+	}
+
 	// Get image format
 	{
 		std::vector<VkSurfaceFormatKHR> formats;
@@ -309,9 +320,17 @@ CreateSwapchain(Swapchain& swapchain, VkSwapchainKHR oldSwapchain = 0)
 			compositeAlpha = VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
 		}
 
+		VkSurfaceFullScreenExclusiveInfoEXT exclusiveFullScreenInfo = {
+			VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT
+		};
+		exclusiveFullScreenInfo.fullScreenExclusive =
+		  g_vk.borderlessWindow ? VK_FULL_SCREEN_EXCLUSIVE_DISALLOWED_EXT
+								: VK_FULL_SCREEN_EXCLUSIVE_ALLOWED_EXT;
+
 		VkSwapchainCreateInfoKHR swapchainInfo = {
 			VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR
 		};
+		swapchainInfo.pNext = &exclusiveFullScreenInfo;
 		swapchainInfo.surface = g_vk.surface;
 		swapchainInfo.minImageCount =
 		  std::clamp(3u,
@@ -568,7 +587,7 @@ bail:
 	return rc;
 }
 
-void
+bool
 RecreateSwapchain(Swapchain& swapchain)
 {
 	vkDeviceWaitIdle(g_vk.device);
@@ -578,12 +597,18 @@ RecreateSwapchain(Swapchain& swapchain)
 	Swapchain newSwapchain{};
 	VkResult rc = CreateSwapchain(newSwapchain, swapchain.swapchain);
 
+	if (rc == Swapchain::NotReady) {
+		return false;
+	}
+
 	if (rc != VK_SUCCESS) {
 		FAIL_M("Display_VK: failed to recreate swapchain");
 	}
 
 	DestroySwapchain(swapchain);
 	swapchain = newSwapchain;
+
+	return true;
 }
 
 auto
@@ -870,6 +895,9 @@ Display_VK::Init(const VideoModeParams& p, bool bAllowUnacceleratedRenderer)
 	extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
 #ifdef VK_USE_PLATFORM_WIN32_KHR
 	extensions.push_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
+
+	// This is for borderless windows, which is a windows thing
+	extensions.push_back(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
 #else
 #error todo
 #endif
@@ -1009,6 +1037,10 @@ Display_VK::Init(const VideoModeParams& p, bool bAllowUnacceleratedRenderer)
 		queueInfo.queueCount = 1;
 		queueInfo.pQueuePriorities = queuePriorites;
 
+#ifdef _WIN32
+		// TODO: query and enable if available
+		deviceExtensions.push_back(VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME);
+#endif
 		deviceExtensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
 
 		VkDeviceCreateInfo deviceInfo = {
@@ -1304,6 +1336,8 @@ Display_VK::TryVideoMode(const VideoModeParams& _p, bool& bNewDeviceOut)
 		}
 	}
 
+	g_vk.borderlessWindow = _p.bWindowIsFullscreenBorderless;
+
 	rc = CreateSwapchain(g_vk.swapchain);
 
 	if (rc != VK_SUCCESS) {
@@ -1334,13 +1368,6 @@ Display_VK::GetActualVideoModeParams() const -> const ActualVideoModeParams*
 #else
 #error todo?
 #endif
-}
-
-void
-Display_VK::ResolutionChanged()
-{
-	g_vk.resolutionChanged = true;
-	RageDisplay::ResolutionChanged();
 }
 
 auto
@@ -1512,6 +1539,13 @@ Display_VK::SupportsTextureFormat(RagePixelFormat pixfmt, bool realtime) -> bool
 	return pixfmt == RagePixelFormat_RGBA8;
 }
 
+void
+Display_VK::ResolutionChanged()
+{
+	g_vk.swapchainInvalid = true;
+	RageDisplay::ResolutionChanged();
+}
+
 auto
 Display_VK::BeginFrame() -> bool
 {
@@ -1522,10 +1556,32 @@ Display_VK::BeginFrame() -> bool
 #error todo?
 #endif
 
-	if (g_vk.resolutionChanged) {
-		RecreateSwapchain(g_vk.swapchain);
-		g_vk.resolutionChanged = false;
+	if (g_vk.swapchainInvalid) {
+		VkSurfaceCapabilitiesKHR surfaceCapabilities = {};
+		VkResult rc = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+		  g_vk.physicalDevice, g_vk.surface, &surfaceCapabilities);
+
+		if (rc != VK_SUCCESS) {
+			return false;
+		}
+
+		if (!RecreateSwapchain(g_vk.swapchain)) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+			return false;
+		}
+
+		g_vk.swapchainInvalid = false;
 	}
+
+	g_vk.frame.count++;
+
+	g_vk.frame.usedTextures.clear();
+	g_vk.quads.quads.clear();
+	g_vk.quads.indices.clear();
+
+	g_vk.worldArray.reset();
+	g_vk.viewArray.reset();
+	g_vk.projectionArray.reset();
 
 	return RageDisplay::BeginFrame();
 }
@@ -1533,7 +1589,7 @@ Display_VK::BeginFrame() -> bool
 void
 Display_VK::EndFrame()
 {
-	// Wait until the last frame is done before talking to the driver again.
+	// Wait until the last frame is done before writing to graphics memory.
 	vkQueueWaitIdle(g_vk.queue);
 
 	VkResult rc = vkAcquireNextImageKHR(g_vk.device,
@@ -1545,44 +1601,46 @@ Display_VK::EndFrame()
 	DEBUG_ASSERT(rc == VK_SUCCESS);
 
 	if (rc != VK_SUCCESS) {
-		return;
+		goto bail;
 	}
 
 	rc = vkResetCommandPool(g_vk.device, g_vk.commandPool, 0);
 	DEBUG_ASSERT(rc == VK_SUCCESS);
 
 	if (rc != VK_SUCCESS) {
-		return;
+		goto bail;
 	}
 
-	VkCommandBufferBeginInfo cmdBeginInfo = {
-		VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
-	};
-	cmdBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-	rc = vkBeginCommandBuffer(g_vk.commandBuffer, &cmdBeginInfo);
-	DEBUG_ASSERT(rc == VK_SUCCESS);
+	{
+		VkCommandBufferBeginInfo cmdBeginInfo = {
+			VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
+		};
+		cmdBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
-	if (rc != VK_SUCCESS) {
-		return;
+		rc = vkBeginCommandBuffer(g_vk.commandBuffer, &cmdBeginInfo);
+
+		if (rc != VK_SUCCESS) {
+			goto bail;
+		}
 	}
 
-	VkClearColorValue color = { 0.0f, 0.0f, 0.0f, 1.0f };
-	VkClearValue clearValue = { color };
+	{
+		VkClearColorValue color = { 0.0f, 0.0f, 0.0f, 1.0f };
+		VkClearValue clearValue = { color };
 
-	VkRenderPassBeginInfo passBeginInfo = {
-		VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO
-	};
-	passBeginInfo.renderPass = g_vk.swapchain.renderPass;
-	passBeginInfo.framebuffer =
-	  g_vk.swapchain.framebuffers[g_vk.frame.imageIndex];
-	passBeginInfo.renderArea.extent = g_vk.swapchain.dim;
-	passBeginInfo.clearValueCount = 1;
-	passBeginInfo.pClearValues = &clearValue;
+		VkRenderPassBeginInfo passBeginInfo = {
+			VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO
+		};
+		passBeginInfo.renderPass = g_vk.swapchain.renderPass;
+		passBeginInfo.framebuffer =
+		  g_vk.swapchain.framebuffers[g_vk.frame.imageIndex];
+		passBeginInfo.renderArea.extent = g_vk.swapchain.dim;
+		passBeginInfo.clearValueCount = 1;
+		passBeginInfo.pClearValues = &clearValue;
 
-	vkCmdBeginRenderPass(
-	  g_vk.commandBuffer, &passBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
-
-	g_vk.frame.count++;
+		vkCmdBeginRenderPass(
+		  g_vk.commandBuffer, &passBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
+	}
 
 	if (g_vk.quads.quads.size() > 0) {
 		if (g_vk.frame.hasNewSetOfTextures) {
@@ -1672,13 +1730,6 @@ Display_VK::EndFrame()
 							 VK_INDEX_TYPE_UINT16);
 		vkCmdDrawIndexed(
 		  g_vk.commandBuffer, uint32_t(g_vk.quads.indices.size()), 1, 0, 0, 0);
-
-		g_vk.quads.quads.clear();
-		g_vk.quads.indices.clear();
-
-		g_vk.worldArray.reset();
-		g_vk.viewArray.reset();
-		g_vk.projectionArray.reset();
 	}
 
 	vkCmdEndRenderPass(g_vk.commandBuffer);
@@ -1728,7 +1779,11 @@ Display_VK::EndFrame()
 	}
 
 bail:
-	g_vk.frame.usedTextures.clear();
+	if (rc == VK_ERROR_OUT_OF_DATE_KHR) {
+		// The game notifies RageDisplay about resolution changes but not
+		// alt-tabs, both of which invaldiate the swapchain.
+		g_vk.swapchainInvalid = true;
+	}
 	return RageDisplay::EndFrame();
 }
 
