@@ -3,6 +3,8 @@
 #include "RageSurface.h"
 #include "Display_VK.h"
 
+#include <array>
+
 #ifdef _WIN32
 #include "archutils/Win32/GraphicsWindow.h"
 
@@ -57,6 +59,30 @@ struct MatrixArray
 	auto data() -> RageMatrix* { return array.data(); }
 };
 
+struct Swapchain
+{
+	enum
+	{
+		MaxImageCount = 3,
+
+		NotReady = 0x12345689
+	};
+
+	uint32_t imageCount;
+
+	VkFormat format;
+	VkExtent2D dim;
+
+	VkSwapchainKHR swapchain;
+	VkRenderPass renderPass;
+
+	std::array<VkImage, MaxImageCount> images;
+	std::array<VkImageView, MaxImageCount> imageViews;
+	std::array<VkFramebuffer, MaxImageCount> framebuffers;
+
+	std::vector<VkPipeline> pipelines;
+};
+
 struct Buffer
 {
 	VmaAllocation allocation;
@@ -72,6 +98,7 @@ struct Texture
 		Wrapping = 0b01,
 		Filtering = 0b10,
 		PossibleSamplerCount = 4,
+
 		MaxSlots = 64
 	};
 
@@ -106,30 +133,11 @@ struct QuadsProgram
 	VkShaderModule vertexShader;
 	VkShaderModule fragmentShader;
 	VkPipelineLayout pipelineLayout;
-	VkDescriptorSet descriptorSet;
 	VkDescriptorSetLayout descriptorSetLayout;
-	Buffer quadsBuffer;
-	Buffer indexBuffer;
-	Buffer uniformBuffer;
-};
-
-struct Swapchain
-{
-	enum
-	{
-		NotReady = 0x12345689
-	};
-
-	VkFormat format;
-	VkExtent2D dim;
-
-	VkSwapchainKHR swapchain;
-	VkRenderPass renderPass;
-
-	std::vector<VkImage> images;
-	std::vector<VkImageView> imageViews;
-	std::vector<VkFramebuffer> framebuffers;
-	std::vector<VkPipeline> pipelines;
+	std::array<VkDescriptorSet, Swapchain::MaxImageCount> descriptorSet;
+	std::array<Buffer, Swapchain::MaxImageCount> quadsBuffer;
+	std::array<Buffer, Swapchain::MaxImageCount> indexBuffer;
+	std::array<Buffer, Swapchain::MaxImageCount> uniformBuffer;
 };
 
 static struct VulkanState
@@ -145,10 +153,11 @@ static struct VulkanState
 	VkPhysicalDevice physicalDevice;
 	VkDevice device;
 	VkCommandPool commandPool;
-	VkCommandBuffer commandBuffer;
 	VkDescriptorPool descriptorPool;
 	uint32_t queueFamilyIndex;
 	VkQueue queue;
+
+	std::array<VkCommandBuffer, Swapchain::MaxImageCount> commandBuffer;
 
 	VmaAllocator allocator;
 
@@ -159,7 +168,7 @@ static struct VulkanState
 	std::unordered_map<intptr_t, Texture> textures;
 	intptr_t nextTextureHandle;
 
-	VkSampler samplers[Texture::PossibleSamplerCount];
+	std::array<VkSampler, Texture::PossibleSamplerCount> samplers;
 	std::vector<VkDescriptorImageInfo> descriptorImageInfos;
 
 	struct
@@ -171,10 +180,10 @@ static struct VulkanState
 	struct
 	{
 		size_t count;
-		uint32_t imageIndex;
+		uint32_t index;
 		std::vector<intptr_t> usedTextures;
-		intptr_t textureSlots[Texture::MaxSlots];
-		bool hasNewSetOfTextures;
+		std::array<intptr_t, Texture::MaxSlots> textureSlots;
+		size_t ofLastTextureChange;
 	} frame;
 
 	QuadsProgram quads;
@@ -197,6 +206,7 @@ DebugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
 		// DISPLAY HELLO
 		fflush(0);
 	}
+
 	DEBUG_ASSERT(
 	  (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) == 0);
 	return VK_FALSE;
@@ -228,15 +238,15 @@ DestroySwapchain(Swapchain& swapchain)
 	for (size_t i = 0; i < swapchain.framebuffers.size(); i++) {
 		if (swapchain.framebuffers[i]) {
 			vkDestroyFramebuffer(g_vk.device, swapchain.framebuffers[i], 0);
+			swapchain.framebuffers[i] = 0;
 		}
 	}
-	swapchain.framebuffers.clear();
 	for (size_t i = 0; i < swapchain.imageViews.size(); i++) {
 		if (swapchain.imageViews[i]) {
 			vkDestroyImageView(g_vk.device, swapchain.imageViews[i], 0);
+			swapchain.imageViews[i] = 0;
 		}
 	}
-	swapchain.imageViews.clear();
 	if (swapchain.renderPass) {
 		vkDestroyRenderPass(g_vk.device, swapchain.renderPass, 0);
 		swapchain.renderPass = 0;
@@ -257,6 +267,11 @@ CreateSwapchain(Swapchain& swapchain, VkSwapchainKHR oldSwapchain = 0)
 
 	rc = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
 	  g_vk.physicalDevice, g_vk.surface, &surfaceCapabilities);
+
+	if (surfaceCapabilities.minImageCount > Swapchain::MaxImageCount) {
+		// Will never happene ever
+		goto bail;
+	}
 
 	if (rc != VK_SUCCESS) {
 		goto bail;
@@ -333,7 +348,7 @@ CreateSwapchain(Swapchain& swapchain, VkSwapchainKHR oldSwapchain = 0)
 		swapchainInfo.pNext = &exclusiveFullScreenInfo;
 		swapchainInfo.surface = g_vk.surface;
 		swapchainInfo.minImageCount =
-		  std::clamp(3u,
+		  std::clamp(uint32_t(Swapchain::MaxImageCount),
 					 surfaceCapabilities.minImageCount,
 					 surfaceCapabilities.maxImageCount);
 		swapchainInfo.imageFormat = format.format;
@@ -365,17 +380,15 @@ CreateSwapchain(Swapchain& swapchain, VkSwapchainKHR oldSwapchain = 0)
 
 	// Create swapchain images, image views
 	{
-		uint32_t swapchainImageCount = 0;
 		vkGetSwapchainImagesKHR(
-		  g_vk.device, swapchain.swapchain, &swapchainImageCount, 0);
-		swapchain.images.resize(swapchainImageCount);
+		  g_vk.device, swapchain.swapchain, &swapchain.imageCount, 0);
+		ASSERT(swapchain.imageCount <= Swapchain::MaxImageCount);
 		vkGetSwapchainImagesKHR(g_vk.device,
 								swapchain.swapchain,
-								&swapchainImageCount,
+								&swapchain.imageCount,
 								swapchain.images.data());
 
-		swapchain.imageViews.resize(swapchainImageCount);
-		for (size_t i = 0; i < swapchainImageCount; i++) {
+		for (size_t i = 0; i < swapchain.imageCount; i++) {
 			VkImageViewCreateInfo imageViewInfo = {
 				VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO
 			};
@@ -449,8 +462,7 @@ CreateSwapchain(Swapchain& swapchain, VkSwapchainKHR oldSwapchain = 0)
 
 	// Create framebuffers
 	{
-		swapchain.framebuffers.resize(swapchain.images.size());
-		for (size_t i = 0; i < swapchain.framebuffers.size(); i++) {
+		for (size_t i = 0; i < swapchain.imageCount; i++) {
 			VkFramebufferCreateInfo framebufferInfo = {
 				VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO
 			};
@@ -507,7 +519,7 @@ CreateSwapchain(Swapchain& swapchain, VkSwapchainKHR oldSwapchain = 0)
 		inputAssemblyInfo.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 		pipelineInfo.pInputAssemblyState = &inputAssemblyInfo;
 
-		// Upside down viewport to match D3D
+		// Upside down viewport to match the rest of the game
 		VkViewport viewport = {};
 		viewport.x = 0;
 		viewport.y = float(height);
@@ -780,20 +792,6 @@ CreateQuadsProgram(QuadsProgram& quads) -> VkResult
 		return rc;
 	}
 
-	VkDescriptorSetAllocateInfo setAllocateInfo = {
-		VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO
-	};
-	setAllocateInfo.descriptorPool = g_vk.descriptorPool;
-	setAllocateInfo.descriptorSetCount = 1;
-	setAllocateInfo.pSetLayouts = &quads.descriptorSetLayout;
-
-	rc = vkAllocateDescriptorSets(
-	  g_vk.device, &setAllocateInfo, &quads.descriptorSet);
-
-	if (rc != VK_SUCCESS) {
-		return rc;
-	}
-
 	VkPipelineLayoutCreateInfo layoutInfo = {
 		VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO
 	};
@@ -807,52 +805,73 @@ CreateQuadsProgram(QuadsProgram& quads) -> VkResult
 		return rc;
 	}
 
-	// Buffers
-	rc = CreatePersistentlyMappedBuffer(
-	  quads.quadsBuffer, 64 * 1024 * 1024, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-	DEBUG_ASSERT(quads.quadsBuffer.buffer);
+	for (size_t i = 0; i < Swapchain::MaxImageCount; i++) {
+		VkDescriptorSetAllocateInfo setAllocateInfo = {
+			VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO
+		};
+		setAllocateInfo.descriptorPool = g_vk.descriptorPool;
+		setAllocateInfo.descriptorSetCount = 1;
+		setAllocateInfo.pSetLayouts = &quads.descriptorSetLayout;
 
-	if (rc != VK_SUCCESS) {
-		return rc;
+		rc = vkAllocateDescriptorSets(
+		  g_vk.device, &setAllocateInfo, &quads.descriptorSet[i]);
+
+		if (rc != VK_SUCCESS) {
+			return rc;
+		}
+
+		// Buffers
+		rc = CreatePersistentlyMappedBuffer(quads.quadsBuffer[i],
+											64 * 1024 * 1024,
+											VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+		DEBUG_ASSERT(quads.quadsBuffer[i].buffer);
+
+		if (rc != VK_SUCCESS) {
+			return rc;
+		}
+
+		rc = CreatePersistentlyMappedBuffer(quads.indexBuffer[i],
+											2 * UINT16_MAX,
+											VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+		DEBUG_ASSERT(quads.indexBuffer[i].buffer);
+
+		if (rc != VK_SUCCESS) {
+			return rc;
+		}
+
+		rc = CreatePersistentlyMappedBuffer(quads.uniformBuffer[i],
+											UINT16_MAX,
+											VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+		DEBUG_ASSERT(quads.uniformBuffer[i].buffer);
+
+		if (rc != VK_SUCCESS) {
+			return rc;
+		}
+
+		VkDescriptorBufferInfo bufferInfo[2] = {};
+		bufferInfo[0].buffer = g_vk.quads.quadsBuffer[i].buffer;
+		bufferInfo[0].range = VK_WHOLE_SIZE;
+		bufferInfo[1].buffer = g_vk.quads.uniformBuffer[i].buffer;
+		bufferInfo[1].range = VK_WHOLE_SIZE;
+
+		VkWriteDescriptorSet writeDescriptorSets[2] = {};
+		writeDescriptorSets[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writeDescriptorSets[0].dstSet = g_vk.quads.descriptorSet[i];
+		writeDescriptorSets[0].dstBinding = 0;
+		writeDescriptorSets[0].descriptorCount = 1;
+		writeDescriptorSets[0].descriptorType =
+		  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		writeDescriptorSets[0].pBufferInfo = &bufferInfo[0];
+		writeDescriptorSets[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writeDescriptorSets[1].dstSet = g_vk.quads.descriptorSet[i];
+		writeDescriptorSets[1].dstBinding = 1;
+		writeDescriptorSets[1].descriptorCount = 1;
+		writeDescriptorSets[1].descriptorType =
+		  VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		writeDescriptorSets[1].pBufferInfo = &bufferInfo[1];
+
+		vkUpdateDescriptorSets(g_vk.device, 2, writeDescriptorSets, 0, 0);
 	}
-
-	rc = CreatePersistentlyMappedBuffer(
-	  quads.indexBuffer, 2 * UINT16_MAX, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-	DEBUG_ASSERT(quads.indexBuffer.buffer);
-
-	if (rc != VK_SUCCESS) {
-		return rc;
-	}
-
-	rc = CreatePersistentlyMappedBuffer(
-	  quads.uniformBuffer, UINT16_MAX, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
-	DEBUG_ASSERT(quads.uniformBuffer.buffer);
-
-	if (rc != VK_SUCCESS) {
-		return rc;
-	}
-
-	VkDescriptorBufferInfo bufferInfo[2] = {};
-	bufferInfo[0].buffer = g_vk.quads.quadsBuffer.buffer;
-	bufferInfo[0].range = VK_WHOLE_SIZE;
-	bufferInfo[1].buffer = g_vk.quads.uniformBuffer.buffer;
-	bufferInfo[1].range = VK_WHOLE_SIZE;
-
-	VkWriteDescriptorSet writeDescriptorSets[2] = {};
-	writeDescriptorSets[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	writeDescriptorSets[0].dstSet = g_vk.quads.descriptorSet;
-	writeDescriptorSets[0].dstBinding = 0;
-	writeDescriptorSets[0].descriptorCount = 1;
-	writeDescriptorSets[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	writeDescriptorSets[0].pBufferInfo = &bufferInfo[0];
-	writeDescriptorSets[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	writeDescriptorSets[1].dstSet = g_vk.quads.descriptorSet;
-	writeDescriptorSets[1].dstBinding = 1;
-	writeDescriptorSets[1].descriptorCount = 1;
-	writeDescriptorSets[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	writeDescriptorSets[1].pBufferInfo = &bufferInfo[1];
-
-	vkUpdateDescriptorSets(g_vk.device, 2, writeDescriptorSets, 0, 0);
 
 	return rc;
 }
@@ -1106,7 +1125,8 @@ Display_VK::Init(const VideoModeParams& p, bool bAllowUnacceleratedRenderer)
 		VkCommandPoolCreateInfo commandPoolInfo = {
 			VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO
 		};
-		commandPoolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+		commandPoolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT |
+								VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
 		commandPoolInfo.queueFamilyIndex = g_vk.queueFamilyIndex;
 
 		rc = vkCreateCommandPool(
@@ -1122,11 +1142,12 @@ Display_VK::Init(const VideoModeParams& p, bool bAllowUnacceleratedRenderer)
 		};
 		allocateInfo.commandPool = g_vk.commandPool;
 		allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-		allocateInfo.commandBufferCount = 1;
+		// We need one for each swapchain image, but don't have a swapchain yet
+		allocateInfo.commandBufferCount = Swapchain::MaxImageCount;
 
 		rc = vkAllocateCommandBuffers(
-		  g_vk.device, &allocateInfo, &g_vk.commandBuffer);
-		DEBUG_ASSERT(g_vk.commandBuffer);
+		  g_vk.device, &allocateInfo, g_vk.commandBuffer.data());
+		DEBUG_ASSERT(g_vk.commandBuffer[0]);
 
 		if (rc != VK_SUCCESS) {
 			goto bail;
@@ -1147,7 +1168,7 @@ Display_VK::Init(const VideoModeParams& p, bool bAllowUnacceleratedRenderer)
 		};
 		descriptorPoolInfo.poolSizeCount = 1;
 		descriptorPoolInfo.pPoolSizes = poolSizes;
-		descriptorPoolInfo.maxSets = 1;
+		descriptorPoolInfo.maxSets = Swapchain::MaxImageCount;
 
 		rc = vkCreateDescriptorPool(
 		  g_vk.device, &descriptorPoolInfo, 0, &g_vk.descriptorPool);
@@ -1209,7 +1230,8 @@ Display_VK::Init(const VideoModeParams& p, bool bAllowUnacceleratedRenderer)
 		  1, 1, 32, 0xff000000, 0x00ff0000, 0x0000ff00, 0x000000ff);
 		CreateTexture(RagePixelFormat_RGBA8, img, false);
 
-		memset(g_vk.frame.textureSlots, -1, sizeof(g_vk.frame.textureSlots));
+		memset(
+		  g_vk.frame.textureSlots.data(), -1, sizeof(g_vk.frame.textureSlots));
 		// Reserve slot 0 for the empty texture
 		g_vk.frame.textureSlots[0] = 0;
 	}
@@ -1228,23 +1250,25 @@ bail:
 			g_vk.samplers[i] = 0;
 		}
 	}
-	if (g_vk.quads.uniformBuffer.buffer) {
-		vmaDestroyBuffer(g_vk.allocator,
-						 g_vk.quads.uniformBuffer.buffer,
-						 g_vk.quads.uniformBuffer.allocation);
-		g_vk.quads.uniformBuffer = {};
-	}
-	if (g_vk.quads.indexBuffer.buffer) {
-		vmaDestroyBuffer(g_vk.allocator,
-						 g_vk.quads.indexBuffer.buffer,
-						 g_vk.quads.indexBuffer.allocation);
-		g_vk.quads.indexBuffer = {};
-	}
-	if (g_vk.quads.quadsBuffer.buffer) {
-		vmaDestroyBuffer(g_vk.allocator,
-						 g_vk.quads.quadsBuffer.buffer,
-						 g_vk.quads.quadsBuffer.allocation);
-		g_vk.quads.quadsBuffer = {};
+	for (size_t i = 0; i < Swapchain::MaxImageCount; i++) {
+		if (g_vk.quads.uniformBuffer[i].buffer) {
+			vmaDestroyBuffer(g_vk.allocator,
+							 g_vk.quads.uniformBuffer[i].buffer,
+							 g_vk.quads.uniformBuffer[i].allocation);
+			g_vk.quads.uniformBuffer[i] = {};
+		}
+		if (g_vk.quads.indexBuffer[i].buffer) {
+			vmaDestroyBuffer(g_vk.allocator,
+							 g_vk.quads.indexBuffer[i].buffer,
+							 g_vk.quads.indexBuffer[i].allocation);
+			g_vk.quads.indexBuffer[i] = {};
+		}
+		if (g_vk.quads.quadsBuffer[i].buffer) {
+			vmaDestroyBuffer(g_vk.allocator,
+							 g_vk.quads.quadsBuffer[i].buffer,
+							 g_vk.quads.quadsBuffer[i].allocation);
+			g_vk.quads.quadsBuffer[i] = {};
+		}
 	}
 	if (g_vk.quads.pipelineLayout) {
 		vkDestroyPipelineLayout(g_vk.device, g_vk.quads.pipelineLayout, 0);
@@ -1519,7 +1543,7 @@ Display_VK::DeleteTexture(intptr_t texHandle)
 	vkQueueWaitIdle(g_vk.queue);
 	DestroyTexture(tex);
 	g_vk.textures.erase(texHandle);
-	g_vk.frame.hasNewSetOfTextures = true;
+	g_vk.frame.ofLastTextureChange = g_vk.frame.count;
 }
 
 auto
@@ -1597,31 +1621,24 @@ Display_VK::EndFrame()
 										~0ULL,
 										g_vk.sem.acquire,
 										VK_NULL_HANDLE,
-										&g_vk.frame.imageIndex);
+										&g_vk.frame.index);
 	DEBUG_ASSERT(rc == VK_SUCCESS);
 
 	if (rc != VK_SUCCESS) {
 		goto bail;
 	}
 
-	rc = vkResetCommandPool(g_vk.device, g_vk.commandPool, 0);
-	DEBUG_ASSERT(rc == VK_SUCCESS);
+	VkCommandBuffer commandBuffer = g_vk.commandBuffer[g_vk.frame.index];
+
+	VkCommandBufferBeginInfo cmdBeginInfo = {
+		VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
+	};
+	cmdBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+	rc = vkBeginCommandBuffer(commandBuffer, &cmdBeginInfo);
 
 	if (rc != VK_SUCCESS) {
 		goto bail;
-	}
-
-	{
-		VkCommandBufferBeginInfo cmdBeginInfo = {
-			VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
-		};
-		cmdBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-
-		rc = vkBeginCommandBuffer(g_vk.commandBuffer, &cmdBeginInfo);
-
-		if (rc != VK_SUCCESS) {
-			goto bail;
-		}
 	}
 
 	{
@@ -1633,17 +1650,18 @@ Display_VK::EndFrame()
 		};
 		passBeginInfo.renderPass = g_vk.swapchain.renderPass;
 		passBeginInfo.framebuffer =
-		  g_vk.swapchain.framebuffers[g_vk.frame.imageIndex];
+		  g_vk.swapchain.framebuffers[g_vk.frame.index];
 		passBeginInfo.renderArea.extent = g_vk.swapchain.dim;
 		passBeginInfo.clearValueCount = 1;
 		passBeginInfo.pClearValues = &clearValue;
 
 		vkCmdBeginRenderPass(
-		  g_vk.commandBuffer, &passBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
+		  commandBuffer, &passBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
 	}
 
 	if (g_vk.quads.quads.size() > 0) {
-		if (g_vk.frame.hasNewSetOfTextures) {
+		if (g_vk.frame.count <=
+			g_vk.frame.ofLastTextureChange + Swapchain::MaxImageCount) {
 			g_vk.descriptorImageInfos.resize(g_vk.maxBoundTextures);
 			VkImageView nullView = g_vk.textures.at(0).view;
 			for (size_t i = 0; i < g_vk.maxBoundTextures; i++) {
@@ -1662,7 +1680,7 @@ Display_VK::EndFrame()
 			VkWriteDescriptorSet writeDescriptor = {
 				VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET
 			};
-			writeDescriptor.dstSet = g_vk.quads.descriptorSet;
+			writeDescriptor.dstSet = g_vk.quads.descriptorSet[g_vk.frame.index];
 			writeDescriptor.dstBinding = 2;
 			writeDescriptor.descriptorCount = g_vk.maxBoundTextures;
 			writeDescriptor.descriptorType =
@@ -1670,14 +1688,12 @@ Display_VK::EndFrame()
 			writeDescriptor.pImageInfo = g_vk.descriptorImageInfos.data();
 
 			vkUpdateDescriptorSets(g_vk.device, 1, &writeDescriptor, 0, 0);
-
-			g_vk.frame.hasNewSetOfTextures = true;
 		}
 
 		DEBUG_ASSERT((g_vk.quads.quads.size() * 6) ==
 					 g_vk.quads.indices.size());
 
-		vkCmdBindPipeline(g_vk.commandBuffer,
+		vkCmdBindPipeline(commandBuffer,
 						  VK_PIPELINE_BIND_POINT_GRAPHICS,
 						  g_vk.swapchain.pipelines[0]);
 
@@ -1693,47 +1709,49 @@ Display_VK::EndFrame()
 
 		ASSERT((g_vk.projectionArray.sizeInBytes() +
 				g_vk.viewArray.sizeInBytes() + g_vk.worldArray.sizeInBytes()) <
-			   g_vk.quads.uniformBuffer.size);
+			   g_vk.quads.uniformBuffer[0].size);
 
-		memcpy(g_vk.quads.quadsBuffer.mappedMemory,
+		size_t idx = g_vk.frame.index;
+
+		memcpy(g_vk.quads.quadsBuffer[idx].mappedMemory,
 			   g_vk.quads.quads.data(),
 			   g_vk.quads.quads.size() * sizeof(QuadsProgram::Quad));
 
-		memcpy(g_vk.quads.indexBuffer.mappedMemory,
+		memcpy(g_vk.quads.indexBuffer[idx].mappedMemory,
 			   g_vk.quads.indices.data(),
 			   g_vk.quads.indices.size() * sizeof(uint16_t));
 
-		memcpy(((RageMatrix*)g_vk.quads.uniformBuffer.mappedMemory) +
+		memcpy(((RageMatrix*)g_vk.quads.uniformBuffer[idx].mappedMemory) +
 				 projectionOffset,
 			   g_vk.projectionArray.data(),
 			   g_vk.projectionArray.sizeInBytes());
-		memcpy(((RageMatrix*)g_vk.quads.uniformBuffer.mappedMemory) +
+		memcpy(((RageMatrix*)g_vk.quads.uniformBuffer[idx].mappedMemory) +
 				 viewOffset,
 			   g_vk.viewArray.data(),
 			   g_vk.viewArray.sizeInBytes());
-		memcpy(((RageMatrix*)g_vk.quads.uniformBuffer.mappedMemory) +
+		memcpy(((RageMatrix*)g_vk.quads.uniformBuffer[idx].mappedMemory) +
 				 worldOffset,
 			   g_vk.worldArray.data(),
 			   g_vk.worldArray.sizeInBytes());
 
-		vkCmdBindDescriptorSets(g_vk.commandBuffer,
+		vkCmdBindDescriptorSets(commandBuffer,
 								VK_PIPELINE_BIND_POINT_GRAPHICS,
 								g_vk.quads.pipelineLayout,
 								0,
 								1,
-								&g_vk.quads.descriptorSet,
+								&g_vk.quads.descriptorSet[idx],
 								0,
 								0);
-		vkCmdBindIndexBuffer(g_vk.commandBuffer,
-							 g_vk.quads.indexBuffer.buffer,
+		vkCmdBindIndexBuffer(commandBuffer,
+							 g_vk.quads.indexBuffer[idx].buffer,
 							 0,
 							 VK_INDEX_TYPE_UINT16);
 		vkCmdDrawIndexed(
-		  g_vk.commandBuffer, uint32_t(g_vk.quads.indices.size()), 1, 0, 0, 0);
+		  commandBuffer, uint32_t(g_vk.quads.indices.size()), 1, 0, 0, 0);
 	}
 
-	vkCmdEndRenderPass(g_vk.commandBuffer);
-	vkEndCommandBuffer(g_vk.commandBuffer);
+	vkCmdEndRenderPass(commandBuffer);
+	vkEndCommandBuffer(commandBuffer);
 
 	{
 		VkPipelineStageFlags submitStageMask =
@@ -1744,7 +1762,7 @@ Display_VK::EndFrame()
 		submitInfo.pWaitSemaphores = &g_vk.sem.acquire;
 		submitInfo.pWaitDstStageMask = &submitStageMask;
 		submitInfo.commandBufferCount = 1;
-		submitInfo.pCommandBuffers = &g_vk.commandBuffer;
+		submitInfo.pCommandBuffers = &commandBuffer;
 		submitInfo.signalSemaphoreCount = 1;
 		submitInfo.pSignalSemaphores = &g_vk.sem.release;
 		rc = vkQueueSubmit(g_vk.queue, 1, &submitInfo, VK_NULL_HANDLE);
@@ -1759,7 +1777,7 @@ Display_VK::EndFrame()
 		presentInfo.pWaitSemaphores = &g_vk.sem.release;
 		presentInfo.swapchainCount = 1;
 		presentInfo.pSwapchains = &g_vk.swapchain.swapchain;
-		presentInfo.pImageIndices = &g_vk.frame.imageIndex;
+		presentInfo.pImageIndices = &g_vk.frame.index;
 
 		// Can use RageDisplay's frame pacing stuff
 		// TODO: find out if Vulkan has better stats for this stuff
@@ -1779,7 +1797,7 @@ Display_VK::EndFrame()
 	}
 
 bail:
-	if (rc == VK_ERROR_OUT_OF_DATE_KHR) {
+	if (rc == VK_ERROR_OUT_OF_DATE_KHR || rc == VK_SUBOPTIMAL_KHR) {
 		// The game notifies RageDisplay about resolution changes but not
 		// alt-tabs, both of which invaldiate the swapchain.
 		g_vk.swapchainInvalid = true;
@@ -1889,7 +1907,7 @@ void
 Display_VK::PushQuads(RenderQuad q[], size_t numQuads)
 {
 	if ((g_vk.quads.quads.size() + numQuads) * sizeof(QuadsProgram::Quad) >
-		g_vk.quads.quadsBuffer.size) {
+		g_vk.quads.quadsBuffer[0].size) {
 		DEBUG_ASSERT(!"Hit quad limit");
 		// Todo: log
 		return;
@@ -1925,7 +1943,7 @@ Display_VK::PushQuads(RenderQuad q[], size_t numQuads)
 	g_vk.quads.indices.resize(indicesOffset + 6 * numQuads);
 
 	ASSERT(g_vk.quads.indices.size() * sizeof(uint16_t) <
-		   g_vk.quads.quadsBuffer.size);
+		   g_vk.quads.quadsBuffer[0].size);
 
 	// Todo: no crash
 	intptr_t handle = q[0].texture;
@@ -1955,7 +1973,7 @@ Display_VK::PushQuads(RenderQuad q[], size_t numQuads)
 				// happens
 				FAIL_M("todo");
 			}
-			g_vk.frame.hasNewSetOfTextures = true;
+			g_vk.frame.ofLastTextureChange = g_vk.frame.count;
 		}
 
 		g_vk.frame.usedTextures.push_back(handle);
