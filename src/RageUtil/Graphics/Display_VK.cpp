@@ -158,6 +158,7 @@ static struct VulkanState
 	VkQueue queue;
 
 	std::array<VkCommandBuffer, Swapchain::MaxImageCount> commandBuffer;
+	std::array<VkFence, Swapchain::MaxImageCount> fences;
 
 	VmaAllocator allocator;
 
@@ -169,7 +170,9 @@ static struct VulkanState
 	intptr_t nextTextureHandle;
 
 	std::array<VkSampler, Texture::PossibleSamplerCount> samplers;
-	std::vector<VkDescriptorImageInfo> descriptorImageInfos;
+	std::array<VkDescriptorImageInfo, Texture::MaxSlots> descriptorImageInfos;
+	std::array<size_t, Swapchain::MaxImageCount>
+	  textureDescriptorSetLastUpdated;
 
 	struct
 	{
@@ -1154,6 +1157,22 @@ Display_VK::Init(const VideoModeParams& p, bool bAllowUnacceleratedRenderer)
 		}
 	}
 
+	// Create fences
+	{
+		VkFenceCreateInfo fenceInfo =
+		  VkFenceCreateInfo{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+		// Create signaled so we can vkWaitForFences on the first frame
+		fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+		for (size_t i = 0; i < Swapchain::MaxImageCount; i++) {
+			rc = vkCreateFence(g_vk.device, &fenceInfo, 0, &g_vk.fences[i]);
+			DEBUG_ASSERT(g_vk.fences[i]);
+
+			if (rc != VK_SUCCESS) {
+				goto bail;
+			}
+		}
+	}
+
 	// Create descriptor pool. This is highly specific to the needs of
 	// QuadsProgram
 	{
@@ -1281,6 +1300,12 @@ bail:
 	if (g_vk.quads.fragmentShader) {
 		vkDestroyShaderModule(g_vk.device, g_vk.quads.fragmentShader, 0);
 		g_vk.quads.fragmentShader = 0;
+	}
+	for (size_t i = 0; i < Swapchain::MaxImageCount; i++) {
+		if (g_vk.fences[i]) {
+			vkDestroyFence(g_vk.device, g_vk.fences[i], 0);
+			g_vk.fences[i] = 0;
+		}
 	}
 	if (g_vk.descriptorPool) {
 		vkDestroyDescriptorPool(g_vk.device, g_vk.descriptorPool, 0);
@@ -1613,9 +1638,6 @@ Display_VK::BeginFrame() -> bool
 void
 Display_VK::EndFrame()
 {
-	// Wait until the last frame is done before writing to graphics memory.
-	vkQueueWaitIdle(g_vk.queue);
-
 	VkResult rc = vkAcquireNextImageKHR(g_vk.device,
 										g_vk.swapchain.swapchain,
 										~0ULL,
@@ -1628,17 +1650,26 @@ Display_VK::EndFrame()
 		goto bail;
 	}
 
+	vkWaitForFences(g_vk.device,
+					1,
+					&g_vk.fences[g_vk.frame.index],
+					VK_FALSE,
+					1000 * 1000 * 1000);
+	vkResetFences(g_vk.device, 1, &g_vk.fences[g_vk.frame.index]);
+
 	VkCommandBuffer commandBuffer = g_vk.commandBuffer[g_vk.frame.index];
 
-	VkCommandBufferBeginInfo cmdBeginInfo = {
-		VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
-	};
-	cmdBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	{
+		VkCommandBufferBeginInfo cmdBeginInfo = {
+			VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
+		};
+		cmdBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
-	rc = vkBeginCommandBuffer(commandBuffer, &cmdBeginInfo);
+		rc = vkBeginCommandBuffer(commandBuffer, &cmdBeginInfo);
 
-	if (rc != VK_SUCCESS) {
-		goto bail;
+		if (rc != VK_SUCCESS) {
+			goto bail;
+		}
 	}
 
 	{
@@ -1660,9 +1691,8 @@ Display_VK::EndFrame()
 	}
 
 	if (g_vk.quads.quads.size() > 0) {
-		if (g_vk.frame.count <=
-			g_vk.frame.ofLastTextureChange + Swapchain::MaxImageCount) {
-			g_vk.descriptorImageInfos.resize(g_vk.maxBoundTextures);
+		if (g_vk.textureDescriptorSetLastUpdated[g_vk.frame.index] <=
+			g_vk.frame.ofLastTextureChange) {
 			VkImageView nullView = g_vk.textures.at(0).view;
 			for (size_t i = 0; i < g_vk.maxBoundTextures; i++) {
 				g_vk.descriptorImageInfos[i].sampler = g_vk.samplers[0];
@@ -1670,11 +1700,14 @@ Display_VK::EndFrame()
 				g_vk.descriptorImageInfos[i].imageLayout =
 				  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 			}
-			for (size_t i = 0; i < g_vk.frame.usedTextures.size(); i++) {
-				Texture& tex = g_vk.textures.at(g_vk.frame.usedTextures[i]);
-				g_vk.descriptorImageInfos[tex.slot].sampler =
-				  tex.lastSamplerUsed;
-				g_vk.descriptorImageInfos[tex.slot].imageView = tex.view;
+			for (size_t i = 0; i < g_vk.maxBoundTextures; i++) {
+				if (g_vk.frame.textureSlots[i] != -1) {
+					Texture& tex = g_vk.textures.at(g_vk.frame.textureSlots[i]);
+					DEBUG_ASSERT(tex.slot < g_vk.maxBoundTextures);
+					g_vk.descriptorImageInfos[tex.slot].sampler =
+					  tex.lastSamplerUsed;
+					g_vk.descriptorImageInfos[tex.slot].imageView = tex.view;
+				}
 			}
 
 			VkWriteDescriptorSet writeDescriptor = {
@@ -1688,6 +1721,9 @@ Display_VK::EndFrame()
 			writeDescriptor.pImageInfo = g_vk.descriptorImageInfos.data();
 
 			vkUpdateDescriptorSets(g_vk.device, 1, &writeDescriptor, 0, 0);
+
+			g_vk.textureDescriptorSetLastUpdated[g_vk.frame.index] =
+			  g_vk.frame.count;
 		}
 
 		DEBUG_ASSERT((g_vk.quads.quads.size() * 6) ==
@@ -1765,7 +1801,8 @@ Display_VK::EndFrame()
 		submitInfo.pCommandBuffers = &commandBuffer;
 		submitInfo.signalSemaphoreCount = 1;
 		submitInfo.pSignalSemaphores = &g_vk.sem.release;
-		rc = vkQueueSubmit(g_vk.queue, 1, &submitInfo, VK_NULL_HANDLE);
+		rc = vkQueueSubmit(
+		  g_vk.queue, 1, &submitInfo, g_vk.fences[g_vk.frame.index]);
 		DEBUG_ASSERT(rc == VK_SUCCESS);
 
 		if (rc != VK_SUCCESS) {
